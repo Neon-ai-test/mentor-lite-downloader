@@ -54,6 +54,20 @@ class KnowledgePoint:
             if value
         )
 
+    def to_context(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "subject": self.subject,
+            "stage": self.stage,
+            "grade": self.grade,
+            "textbook": self.textbook,
+            "chapter": self.chapter,
+            "group": self.group,
+            "name": self.name,
+            "description": self.description,
+            "aliases": list(self.aliases),
+        }
+
 
 @dataclass(slots=True)
 class Candidate:
@@ -69,6 +83,7 @@ class Candidate:
     view_count: int = 0
     like_count: int = 0
     comment_count: int = 0
+    share_count: int = 0
     favorite_count: int = 0
     danmaku_count: int = 0
     precheck_score: float = 0.0
@@ -76,6 +91,14 @@ class Candidate:
     score_breakdown: dict[str, float] = field(default_factory=dict)
     comments: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def raw_metadata(self) -> dict[str, Any]:
+        return self.raw
+
+    @raw_metadata.setter
+    def raw_metadata(self, value: dict[str, Any]) -> None:
+        self.raw = value
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -91,6 +114,7 @@ class Candidate:
             "view_count": self.view_count,
             "like_count": self.like_count,
             "comment_count": self.comment_count,
+            "share_count": self.share_count,
             "favorite_count": self.favorite_count,
             "danmaku_count": self.danmaku_count,
             "precheck_score": self.precheck_score,

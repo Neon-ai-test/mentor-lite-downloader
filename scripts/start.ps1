@@ -20,12 +20,60 @@ function Write-Step([string]$Message) {
 }
 
 function Test-Server([int]$TargetPort) {
+    return $null -ne (Get-ServerHealth $TargetPort)
+}
+
+function Get-ServerHealth([int]$TargetPort) {
     try {
-        $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$TargetPort/api/health" -TimeoutSec 2
-        return $response.StatusCode -eq 200
+        return Invoke-RestMethod -UseBasicParsing -Uri "http://127.0.0.1:$TargetPort/api/health" -TimeoutSec 2
     }
     catch {
-        return $false
+        return $null
+    }
+}
+
+function Get-PortProcessId([int]$TargetPort) {
+    try {
+        $connection = Get-NetTCPConnection -LocalPort $TargetPort -State Listen -ErrorAction Stop | Select-Object -First 1
+        if ($connection) { return [int]$connection.OwningProcess }
+    }
+    catch {
+        return $null
+    }
+    return $null
+}
+
+function Stop-ExistingServer([int]$TargetPort) {
+    $stopped = $false
+    if (Test-Path $pidFile) {
+        $pidValue = Get-Content $pidFile -ErrorAction SilentlyContinue
+        if ($pidValue) {
+            $process = Get-Process -Id ([int]$pidValue) -ErrorAction SilentlyContinue
+            if ($process) {
+                Write-Step "Stopping existing local server process $pidValue"
+                Stop-Process -Id $process.Id -Force
+                $stopped = $true
+            }
+        }
+        Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
+    }
+    if (-not $stopped) {
+        $portPid = Get-PortProcessId $TargetPort
+        if ($portPid) {
+            $process = Get-Process -Id $portPid -ErrorAction SilentlyContinue
+            if ($process) {
+                Write-Step "Stopping existing local server on port $TargetPort, process $portPid"
+                Stop-Process -Id $process.Id -Force
+                $stopped = $true
+            }
+        }
+    }
+    if ($stopped) {
+        $deadline = (Get-Date).AddSeconds(15)
+        while ((Get-Date) -lt $deadline) {
+            if (-not (Test-Server $TargetPort)) { break }
+            Start-Sleep -Milliseconds 300
+        }
     }
 }
 
@@ -57,26 +105,34 @@ Write-Step "Ensuring local Playwright Chromium is installed"
 & $pythonExe -m playwright install chromium
 if ($LASTEXITCODE -ne 0) { throw "Playwright Chromium installation failed." }
 
-if (Test-Server $Port) {
-    Write-Host "[MENTOR-LITE] Server already running: http://127.0.0.1:$Port" -ForegroundColor Green
+$health = Get-ServerHealth $Port
+if ($health) {
+    $serverRoot = ""
+    if ($health.root) {
+        try { $serverRoot = (Resolve-Path ([string]$health.root)).Path } catch { $serverRoot = [string]$health.root }
+    }
+    $localRoot = (Resolve-Path $root).Path
+    if ($serverRoot -and $serverRoot -ne $localRoot) {
+        throw "Port $Port is already used by another MENTOR Lite root: $serverRoot"
+    }
+    Stop-ExistingServer $Port
 }
-else {
-    Write-Step "Starting local server on port $Port"
-    $process = Start-Process -FilePath $pythonExe `
-        -ArgumentList @("-m", "mentor_lite.api", "--host", "127.0.0.1", "--port", "$Port") `
-        -WorkingDirectory $root -WindowStyle Hidden -PassThru `
-        -RedirectStandardOutput $outLog -RedirectStandardError $errLog
-    Set-Content -Path $pidFile -Value $process.Id
 
-    $deadline = (Get-Date).AddSeconds(60)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-Server $Port) { break }
-        Start-Sleep -Milliseconds 800
-    }
-    if (-not (Test-Server $Port)) {
-        if (Test-Path $errLog) { Get-Content $errLog -Tail 60 }
-        throw "Server did not become ready. See $errLog"
-    }
+Write-Step "Starting local server on port $Port"
+$process = Start-Process -FilePath $pythonExe `
+    -ArgumentList @("-m", "mentor_lite.api", "--host", "127.0.0.1", "--port", "$Port") `
+    -WorkingDirectory $root -WindowStyle Hidden -PassThru `
+    -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+Set-Content -Path $pidFile -Value $process.Id
+
+$deadline = (Get-Date).AddSeconds(60)
+while ((Get-Date) -lt $deadline) {
+    if (Test-Server $Port) { break }
+    Start-Sleep -Milliseconds 800
+}
+if (-not (Test-Server $Port)) {
+    if (Test-Path $errLog) { Get-Content $errLog -Tail 60 }
+    throw "Server did not become ready. See $errLog"
 }
 
 $url = "http://127.0.0.1:$Port"

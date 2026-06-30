@@ -1,0 +1,117 @@
+version: 1
+
+dynamic_catalog_files:
+  - ../data/knowledge/knowledge_points.json
+
+context:
+  subject: 数学
+  stage: 初中
+  education_terms:
+    - 数学
+    - 初中
+    - 初一
+    - 初二
+    - 初三
+    - 七年级
+    - 八年级
+    - 九年级
+    - 中考
+    - 几何
+    - 代数
+    - 课堂
+    - 知识点
+    - 老师
+    - 讲解
+    - 例题
+    - 教材
+
+query_templates:
+  - "{stage}{subject} {keyword} 知识点 讲解"
+  - "{keyword} {stage}{subject} 教学"
+  - "{keyword} {subject} 例题 讲解"
+  - "{grade}{subject} {entity} {intent}"
+
+duration:
+  max_seconds: 900
+
+global_reject_terms:
+  - 健身
+  - 训练
+  - 拉伸
+  - 解剖
+  - 肌肉
+  - 康复
+  - 医学
+  - 瑜伽
+  - 编程
+  - 程序员
+  - 程序设计
+  - C语言
+  - Python
+  - Java
+  - 代码
+  - 运行结果
+  - 输出任意
+  - 打印菱形
+  - printf
+  - 控制台输出
+
+intents:
+  定义:
+    aliases: [定义, 概念, 是什么]
+  性质:
+    aliases: [性质, 特征, 特点]
+  判定:
+    aliases: [判定, 判断, 证明]
+  计算:
+    aliases: [计算, 求法, 怎么求, 面积, 周长]
+  例题:
+    aliases: [例题, 习题, 考题, 真题]
+
+knowledge_points:
+  菱形:
+    aliases: [菱形]
+    grades: [八年级, 初二, 九年级, 初三]
+    related_terms: [平行四边形, 四边相等, 对角线, 特殊四边形]
+    reject_terms: [菱形肌, 菱形脸, 菱形图案, 菱形铺砖]
+  二次函数:
+    aliases: [二次函数, 抛物线]
+    grades: [九年级, 初三]
+    related_terms: [顶点, 对称轴, 开口方向, 最值, 一般式, 顶点式]
+    reject_terms: [编程函数, Python函数, Java函数]
+  圆:
+    aliases: [圆, 圆形]
+    grades: [九年级, 初三]
+    related_terms: [半径, 直径, 圆心, 弦, 切线]
+    reject_terms: [圆肩, 圆脸, 团圆, 甜甜圈]
+
+scoring:
+  entity_all_in_title: 42
+  entity_term_in_title: 22
+  entity_all_in_content: 16
+  cover_entity_all: 5
+  cover_entity_term: 2
+  cover_entity_cap: 8
+  intent_in_title: 22
+  intent_in_description: 12
+  intent_in_comments: 5
+  cover_intent: 3
+  cover_intent_cap: 3
+  education_context: 16
+  cover_education_context: 2
+  cover_education_cap: 2
+  related_term_each: 3
+  related_term_cap: 9
+  reject_penalty: 100
+  duration_over_limit_penalty: 100
+  acceptance_threshold: 55
+  relaxed_entity_threshold: 20
+  context_recall_threshold: 16
+  relevance_weight: 0.80
+  engagement_weight: 0.20
+
+engagement:
+  view_weight: 45
+  like_weight: 25
+  comment_weight: 15
+  share_weight: 15

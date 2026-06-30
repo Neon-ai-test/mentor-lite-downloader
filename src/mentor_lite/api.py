@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import base64
 import subprocess
 import sys
 import uuid
+from dataclasses import asdict
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Any
@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from mentor_lite.bilibili import auth_summary, search_bilibili
 from mentor_lite.downloader import download_bilibili_flat
-from mentor_lite.knowledge import import_knowledge_file, make_knowledge_point
+from mentor_lite.knowledge import import_knowledge_file, make_knowledge_point, preview_upload, save_upload
 from mentor_lite.settings import Settings
 from mentor_lite.storage import Repository
 
@@ -42,6 +42,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def no_cache_static_assets(request: Any, call_next: Any) -> Any:
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 STATIC_DIR = settings.root / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -69,6 +77,10 @@ class DownloadPayload(BaseModel):
     candidate_ids: list[int] = Field(min_length=1, max_length=100)
 
 
+class IdsPayload(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=500)
+
+
 class KnowledgeImportPayload(BaseModel):
     filename: str = Field(min_length=1, max_length=260)
     content_base64: str = Field(min_length=1)
@@ -78,11 +90,39 @@ class KnowledgeImportPayload(BaseModel):
     textbook: str = Field(default="", max_length=120)
 
 
+class KnowledgeImportPreviewPayload(BaseModel):
+    filename: str = Field(min_length=1, max_length=260)
+    content_base64: str = Field(min_length=1)
+
+
+class KnowledgeImportCommitPayload(BaseModel):
+    upload_id: str = Field(min_length=32, max_length=32)
+    sheet_name: str | None = Field(default=None, max_length=120)
+    header_row: int | None = Field(default=None, ge=1)
+    field_mapping: dict[str, str | None] = Field(default_factory=dict)
+    defaults: dict[str, str] = Field(default_factory=dict)
+
+
 def model_data(model: BaseModel) -> dict[str, Any]:
     dump = getattr(model, "model_dump", None)
     if callable(dump):
         return dump()
     return model.dict()
+
+
+def upload_dir() -> Path:
+    path = settings.runtime_dir / "uploads"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def resolve_upload_path(upload_id: str) -> Path:
+    if not upload_id or any(char not in "0123456789abcdef" for char in upload_id.lower()):
+        raise HTTPException(status_code=400, detail="上传编号无效")
+    matches = list(upload_dir().glob(f"{upload_id}_*"))
+    if not matches:
+        raise HTTPException(status_code=404, detail="上传文件不存在或已被清理")
+    return matches[0]
 
 
 def task_running(task_id: str) -> bool:
@@ -274,6 +314,11 @@ def clear_auth() -> dict[str, Any]:
     return {"cleared": removed, "auth": auth_summary(settings)}
 
 
+@app.post("/api/auth/clear")
+def clear_auth_action() -> dict[str, Any]:
+    return clear_auth()
+
+
 @app.get("/api/knowledge")
 def list_knowledge() -> list[dict[str, Any]]:
     return repository.list_knowledge()
@@ -290,36 +335,97 @@ def create_knowledge(payload: KnowledgePayload) -> dict[str, Any]:
     return {"saved": True, "knowledge": saved}
 
 
+@app.put("/api/knowledge/{point_id}")
+def update_knowledge(point_id: str, payload: KnowledgePayload) -> dict[str, Any]:
+    if repository.get_knowledge(point_id) is None:
+        raise HTTPException(status_code=404, detail="知识点不存在")
+    try:
+        point = make_knowledge_point(model_data(payload), point_id=point_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    repository.upsert_knowledge(point)
+    saved = next((item for item in repository.list_knowledge() if item["id"] == point.id), None)
+    return {"saved": True, "knowledge": saved}
+
+
 @app.delete("/api/knowledge/{point_id}")
 def delete_knowledge(point_id: str) -> dict[str, Any]:
     return {"deleted": repository.delete_knowledge(point_id)}
 
 
+@app.post("/api/knowledge/{point_id}/delete")
+def delete_knowledge_action(point_id: str) -> dict[str, Any]:
+    return delete_knowledge(point_id)
+
+
+@app.post("/api/knowledge/delete")
+def delete_knowledge_batch(payload: IdsPayload) -> dict[str, Any]:
+    deleted = repository.delete_knowledge_many([str(item) for item in payload.ids])
+    return {"deleted": deleted}
+
+
 @app.post("/api/knowledge/import")
 def import_knowledge(payload: KnowledgeImportPayload) -> dict[str, Any]:
-    suffix = Path(payload.filename or "knowledge.xlsx").suffix.lower()
-    if suffix not in {".xlsx", ".xlsm", ".csv"}:
-        raise HTTPException(status_code=400, detail="仅支持 .xlsx、.xlsm 或 .csv")
-    upload_dir = settings.runtime_dir / "uploads"
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    upload_path = upload_dir / f"{uuid.uuid4().hex}{suffix}"
     try:
-        upload_path.write_bytes(base64.b64decode(payload.content_base64, validate=True))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="上传文件不是有效的 Base64 内容") from exc
-    try:
+        upload = save_upload(upload_dir(), payload.filename, payload.content_base64)
         points = import_knowledge_file(
-            upload_path,
-            subject=payload.subject,
-            stage=payload.stage,
-            grade=payload.grade,
-            textbook=payload.textbook,
+            Path(upload["file_path"]),
+            defaults={
+                "subject": payload.subject,
+                "stage": payload.stage,
+                "grade": payload.grade,
+                "textbook": payload.textbook,
+            },
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     for point in points:
         repository.upsert_knowledge(point)
     return {"imported_count": len(points), "knowledge_count": len(repository.list_knowledge())}
+
+
+@app.post("/api/knowledge/import/preview")
+def preview_knowledge_import(payload: KnowledgeImportPreviewPayload) -> dict[str, Any]:
+    try:
+        upload = save_upload(upload_dir(), payload.filename, payload.content_base64)
+        preview = preview_upload(Path(upload["file_path"]))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    preview.update(
+        {
+            "upload_id": upload["upload_id"],
+            "filename": upload["filename"],
+            "file_path": upload["file_path"],
+            "target_catalog_path": str(settings.data_dir / "knowledge" / "knowledge_points.json"),
+        }
+    )
+    return preview
+
+
+@app.post("/api/knowledge/import/commit")
+def commit_knowledge_import(payload: KnowledgeImportCommitPayload) -> dict[str, Any]:
+    upload_path = resolve_upload_path(payload.upload_id)
+    try:
+        points = import_knowledge_file(
+            upload_path,
+            field_mapping=payload.field_mapping,
+            defaults=payload.defaults,
+            sheet_name=payload.sheet_name,
+            header_row=payload.header_row,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    for point in points:
+        repository.upsert_knowledge(point)
+    return {
+        "imported_count": len(points),
+        "total_count": len(repository.list_knowledge()),
+        "skipped_count": 0,
+        "errors": [],
+        "catalog_path": str(settings.db_path),
+        "catalog_count": len(repository.list_knowledge()),
+        "knowledge_points": [asdict(point) for point in points[:20]],
+    }
 
 
 @app.post("/api/tasks", status_code=202)
@@ -354,6 +460,45 @@ def get_task(task_id: str) -> dict[str, Any]:
     return task
 
 
+@app.delete("/api/tasks/{task_id}")
+def delete_task(task_id: str) -> dict[str, Any]:
+    task = repository.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task_running(task_id) or task.get("status") == "RUNNING":
+        raise HTTPException(status_code=409, detail="任务正在运行，不能删除")
+    deleted_candidates = repository.delete_task(task_id)
+    with active_lock:
+        active_task_ids.discard(task_id)
+    return {"deleted": True, "deleted_candidates": deleted_candidates}
+
+
+@app.post("/api/tasks/{task_id}/delete")
+def delete_task_action(task_id: str) -> dict[str, Any]:
+    return delete_task(task_id)
+
+
+@app.delete("/api/tasks")
+def clear_tasks(status: str | None = Query(default="finished")) -> dict[str, Any]:
+    if status == "all":
+        running = [task for task in repository.list_tasks(500) if task_running(str(task["id"])) or task["status"] == "RUNNING"]
+        if running:
+            raise HTTPException(status_code=409, detail=f"仍有 {len(running)} 个运行中任务，不能清空全部")
+        result = repository.clear_tasks()
+    elif status in {None, "", "finished"}:
+        result = repository.clear_tasks({"COMPLETED", "PARTIAL", "FAILED"})
+    else:
+        allowed = {item.strip().upper() for item in status.split(",") if item.strip()}
+        allowed.discard("RUNNING")
+        result = repository.clear_tasks(allowed or {"COMPLETED", "PARTIAL", "FAILED"})
+    return {"deleted_tasks": result["tasks"], "deleted_candidates": result["candidates"]}
+
+
+@app.post("/api/tasks/clear")
+def clear_tasks_action(status: str | None = Query(default="finished")) -> dict[str, Any]:
+    return clear_tasks(status)
+
+
 @app.get("/api/candidates")
 def list_candidates(
     task_id: str | None = None,
@@ -363,6 +508,31 @@ def list_candidates(
     for row in rows:
         row["downloading"] = candidate_downloading(int(row["id"]))
     return rows
+
+
+@app.delete("/api/candidates/{candidate_id}")
+def delete_candidate(candidate_id: int) -> dict[str, Any]:
+    if candidate_downloading(candidate_id):
+        raise HTTPException(status_code=409, detail="候选正在下载，不能删除")
+    return {"deleted": repository.delete_candidate(candidate_id)}
+
+
+@app.post("/api/candidates/{candidate_id}/delete")
+def delete_candidate_action(candidate_id: int) -> dict[str, Any]:
+    return delete_candidate(candidate_id)
+
+
+@app.delete("/api/candidates")
+def clear_candidates(task_id: str | None = None) -> dict[str, Any]:
+    if active_candidate_ids:
+        raise HTTPException(status_code=409, detail="仍有候选正在下载，不能清空候选库")
+    deleted = repository.clear_candidates(task_id=task_id)
+    return {"deleted": deleted}
+
+
+@app.post("/api/candidates/clear")
+def clear_candidates_action(task_id: str | None = None) -> dict[str, Any]:
+    return clear_candidates(task_id)
 
 
 @app.post("/api/candidates/download", status_code=202)

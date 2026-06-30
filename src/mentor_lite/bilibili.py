@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 import time
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, quote_plus, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from mentor_lite.models import Candidate, KnowledgePoint
+from mentor_lite.precheck import (
+    build_query_variants as build_precheck_query_variants,
+    deduplicate_videos,
+    diversify_candidates,
+    extract_core_terms,
+    refresh_candidate_precheck,
+)
 from mentor_lite.settings import Settings
 
 BV_RE = re.compile(r"/video/(BV[0-9A-Za-z]+)", re.IGNORECASE)
@@ -92,63 +97,79 @@ def parse_duration(value: str | None) -> int | None:
     return None
 
 
-def build_query_variants(point: KnowledgePoint, keyword: str = "") -> list[str]:
-    name = point.name.strip()
-    seed = keyword.strip() or name
-    values = [
-        f"{point.stage}{point.subject} {point.grade} {name} 知识点 讲解",
-        f"{point.grade}{point.subject} {name} 讲解",
-        f"{point.subject} {point.chapter} {name}",
-        f"{point.subject} {point.group} {name} 讲解",
-        seed,
-    ]
-    return [re.sub(r"\s+", " ", item).strip() for item in dict.fromkeys(values) if item.strip()]
+def _safe_int(value: object) -> int | None:
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
 
 
-def score_candidate(candidate: Candidate, point: KnowledgePoint, keyword: str = "") -> None:
-    terms = [point.name, *point.aliases, point.group, point.chapter, keyword]
-    terms = [compact_text(term) for term in terms if compact_text(term) and compact_text(term) not in GENERIC_TERMS]
-    terms = list(dict.fromkeys(terms))
-    title = compact_text(candidate.title)
-    description = compact_text(candidate.description)
-    comments = compact_text(" ".join(candidate.comments[:10]))
-    evidence = title + description + comments
-    subject_terms = [compact_text(point.subject), compact_text(point.grade), compact_text(point.stage)]
-    subject_terms = [term for term in subject_terms if term]
+def _selection_terms(keyword: str, search_query: str) -> list[str]:
+    terms: list[str] = []
+    for text in [keyword, search_query]:
+        for term in extract_core_terms(text):
+            cleaned = compact_text(term)
+            if len(cleaned) < 2 or cleaned in GENERIC_TERMS:
+                continue
+            terms.append(cleaned)
+    return list(dict.fromkeys(terms))
 
-    title_hits = sum(1 for term in terms if term in title)
-    evidence_hits = sum(1 for term in terms if term in evidence)
-    subject_hits = sum(1 for term in subject_terms if term in evidence)
-    title_score = min(45, title_hits * 22)
-    evidence_score = min(24, evidence_hits * 8)
-    subject_score = min(12, subject_hits * 4)
-    engagement_score = min(math.log10(candidate.view_count + 1) / 6, 1) * 12
-    interaction_score = min(math.log10(candidate.like_count + candidate.favorite_count + 1) / 5, 1) * 7
-    duration_penalty = 0
-    if candidate.duration_seconds and candidate.duration_seconds > 15 * 60:
-        duration_penalty = min(18, (candidate.duration_seconds - 15 * 60) / 60)
-    score = max(0.0, min(100.0, title_score + evidence_score + subject_score + engagement_score + interaction_score - duration_penalty))
-    candidate.precheck_score = round(score, 2)
-    candidate.score_breakdown = {
-        "title_score": round(title_score, 2),
-        "evidence_score": round(evidence_score, 2),
-        "subject_score": round(subject_score, 2),
-        "engagement_score": round(engagement_score, 2),
-        "interaction_score": round(interaction_score, 2),
-        "duration_penalty": round(duration_penalty, 2),
+
+def select_bilibili_page(
+    data: dict[str, object],
+    keyword: str,
+    search_query: str,
+    requested_page: int | None = None,
+) -> dict[str, object]:
+    pages = data.get("pages") if isinstance(data.get("pages"), list) else []
+    typed_pages = [page for page in pages if isinstance(page, dict)]
+    if not typed_pages:
+        return {
+            "page": None,
+            "is_multipart": False,
+            "selected_page_relevant": True,
+            "selected_by": "no_page_metadata",
+            "matched_terms": [],
+        }
+
+    is_multipart = len(typed_pages) > 1
+    if requested_page is not None:
+        for page in typed_pages:
+            if _safe_int(page.get("page")) == requested_page:
+                return {
+                    "page": page,
+                    "is_multipart": is_multipart,
+                    "selected_page_relevant": True,
+                    "selected_by": "requested_page",
+                    "matched_terms": [],
+                }
+
+    terms = _selection_terms(keyword, search_query)
+    ranked: list[tuple[int, int, dict[str, object], list[str]]] = []
+    for page in typed_pages:
+        part_text = compact_text(str(page.get("part") or ""))
+        matched_terms = [term for term in terms if term in part_text]
+        score = sum(10 + min(len(term), 8) for term in matched_terms)
+        page_number = _safe_int(page.get("page")) or 1
+        ranked.append((score, -page_number, page, matched_terms))
+
+    best_score, _, best_page, matched_terms = max(ranked, key=lambda item: (item[0], item[1]))
+    if is_multipart and best_score <= 0:
+        return {
+            "page": best_page,
+            "is_multipart": True,
+            "selected_page_relevant": False,
+            "selected_by": "first_page_unmatched",
+            "matched_terms": [],
+        }
+    return {
+        "page": best_page,
+        "is_multipart": is_multipart,
+        "selected_page_relevant": True,
+        "selected_by": "title_match" if is_multipart else "single_page",
+        "matched_terms": matched_terms,
     }
-    if title_hits:
-        candidate.precheck_reason = "标题命中知识点关键词"
-    elif evidence_hits:
-        candidate.precheck_reason = "简介或评论命中知识点关键词"
-    elif subject_hits:
-        candidate.precheck_reason = "存在学段/学科语境，建议人工复核"
-    else:
-        candidate.precheck_reason = "相关性较弱"
-
-
-def is_candidate_accepted(candidate: Candidate) -> bool:
-    return candidate.precheck_score >= 48
 
 
 def card_to_candidate(card: dict[str, Any]) -> Candidate | None:
@@ -169,7 +190,12 @@ def card_to_candidate(card: dict[str, Any]) -> Candidate | None:
         duration_seconds=parse_duration(card.get("duration")),
         description=str(card.get("description") or "").strip(),
         cover_url=str(card.get("cover_url") or "").strip(),
-        raw={"search_card": card, "bvid": bvid, "search_page_number": page_number},
+        raw={
+            "search_card": card,
+            "bvid": bvid,
+            "bilibili_bvid": bvid,
+            "search_page_number": page_number,
+        },
     )
 
 
@@ -186,24 +212,30 @@ def enrich_candidate(context: Any, candidate: Candidate, settings: Settings, poi
     except Exception:
         data = {}
     if data:
-        pages = [item for item in data.get("pages") or [] if isinstance(item, dict)]
-        selected_page = select_page(pages, point, query, candidate.raw.get("search_page_number"))
+        collection_title = str(data.get("title") or candidate.title)
+        requested_page = candidate.raw.get("search_page_number")
+        selected = select_bilibili_page(
+            data,
+            point.name,
+            query,
+            int(requested_page) if isinstance(requested_page, int) else None,
+        )
+        selected_page = selected.get("page") if isinstance(selected.get("page"), dict) else None
+        page_number = _safe_int(selected_page.get("page")) if selected_page else None
+        part_title = str(selected_page.get("part") or "").strip() if selected_page else ""
+        page_duration = _safe_int(selected_page.get("duration")) if selected_page else None
         stat = data.get("stat") or {}
         owner = data.get("owner") or {}
-        if selected_page:
-            page_number = int(selected_page.get("page") or 1)
-            candidate.external_id = f"{bvid}:p{page_number}" if len(pages) > 1 else bvid
-            candidate.canonical_url = (
-                f"https://www.bilibili.com/video/{bvid}?p={page_number}"
-                if len(pages) > 1
-                else f"https://www.bilibili.com/video/{bvid}"
-            )
-            candidate.title = str(selected_page.get("part") or data.get("title") or candidate.title)
-            candidate.duration_seconds = int(selected_page.get("duration") or data.get("duration") or 0) or candidate.duration_seconds
-            candidate.raw["selected_page"] = selected_page
+        if selected.get("is_multipart") and page_number is not None:
+            candidate.external_id = f"{bvid}:p{page_number}"
+            candidate.canonical_url = f"https://www.bilibili.com/video/{bvid}?p={page_number}"
+            candidate.title = part_title or collection_title
+            candidate.duration_seconds = page_duration or _safe_int(data.get("duration")) or candidate.duration_seconds
         else:
-            candidate.title = str(data.get("title") or candidate.title)
-            candidate.duration_seconds = int(data.get("duration") or 0) or candidate.duration_seconds
+            candidate.external_id = bvid
+            candidate.canonical_url = f"https://www.bilibili.com/video/{bvid}"
+            candidate.title = collection_title or candidate.title
+            candidate.duration_seconds = _safe_int(data.get("duration")) or candidate.duration_seconds
         candidate.author = str(owner.get("name") or candidate.author)
         candidate.description = str(data.get("desc") or candidate.description)
         candidate.cover_url = str(data.get("pic") or candidate.cover_url)
@@ -211,16 +243,47 @@ def enrich_candidate(context: Any, candidate: Candidate, settings: Settings, poi
         candidate.view_count = int(stat.get("view") or 0)
         candidate.like_count = int(stat.get("like") or 0)
         candidate.comment_count = int(stat.get("reply") or 0)
+        candidate.share_count = int(stat.get("share") or 0)
         candidate.favorite_count = int(stat.get("favorite") or 0)
         candidate.danmaku_count = int(stat.get("danmaku") or 0)
-        candidate.raw["view"] = {
+        pages = [item for item in data.get("pages") or [] if isinstance(item, dict)]
+        candidate.raw["bilibili_view"] = {
+            "bvid": bvid,
             "aid": data.get("aid"),
             "cid": selected_page.get("cid") if selected_page else data.get("cid"),
+            "collection_title": collection_title,
+            "collection_duration_seconds": _safe_int(data.get("duration")),
+            "is_multipart": bool(selected.get("is_multipart")),
+            "selected_page_number": page_number,
+            "selected_page_title": part_title or None,
+            "selected_page_duration_seconds": page_duration,
+            "selected_page_relevant": bool(selected.get("selected_page_relevant")),
+            "selected_by": selected.get("selected_by"),
+            "matched_terms": selected.get("matched_terms") or [],
             "page_count": len(pages),
+            "stat": stat,
         }
         aid = data.get("aid")
         if aid:
             candidate.comments = fetch_comments(request_context, aid, settings)
+
+
+def prechecked_candidates(candidates: list[Candidate], target_count: int | None = None) -> list[Candidate]:
+    unique = deduplicate_videos(candidates)
+    return diversify_candidates(unique, target_count)
+
+
+def should_skip_multipart_candidate(candidate: Candidate) -> bool:
+    view = candidate.raw.get("bilibili_view")
+    if not isinstance(view, dict):
+        return False
+    return bool(view.get("is_multipart")) and not bool(view.get("selected_page_relevant"))
+
+
+def apply_precheck(candidate: Candidate, result: Any) -> None:
+    candidate.precheck_score = result.total_score
+    candidate.precheck_reason = result.reason
+    candidate.score_breakdown = result.score_breakdown
 
 
 def select_page(
@@ -272,27 +335,6 @@ def fetch_comments(request_context: Any, aid: object, settings: Settings) -> lis
     return []
 
 
-def near_duplicate(left: Candidate, right: Candidate) -> bool:
-    left_bvid = left.external_id.split(":p", 1)[0].lower()
-    right_bvid = right.external_id.split(":p", 1)[0].lower()
-    if left_bvid == right_bvid:
-        return True
-    left_title = compact_text(left.title)
-    right_title = compact_text(right.title)
-    if left_title and right_title and SequenceMatcher(None, left_title, right_title).ratio() >= 0.9:
-        if not left.author or not right.author or left.author == right.author:
-            return True
-    return False
-
-
-def dedupe_candidates(candidates: list[Candidate]) -> list[Candidate]:
-    result: list[Candidate] = []
-    for candidate in sorted(candidates, key=lambda item: item.precheck_score, reverse=True):
-        if not any(near_duplicate(candidate, kept) for kept in result):
-            result.append(candidate)
-    return result
-
-
 def search_bilibili(
     settings: Settings,
     point: KnowledgePoint,
@@ -303,14 +345,16 @@ def search_bilibili(
 ) -> list[Candidate]:
     from playwright.sync_api import sync_playwright
 
-    queries = build_query_variants(point, keyword)
+    scoring_keyword = keyword.strip() or point.name
+    knowledge_context = point.to_context()
+    queries = build_precheck_query_variants(scoring_keyword, settings.rules_path, knowledge_context)
     accepted: list[Candidate] = []
     seen: set[str] = set()
     processed = 0
 
     def emit(stage: str, percent: int, message: str) -> None:
         if progress:
-            progress(stage, percent, message, processed, len(dedupe_candidates(accepted)))
+            progress(stage, percent, message, processed, len(prechecked_candidates(accepted, target_count)))
 
     emit("PREPARING", 5, f"生成 {len(queries)} 组搜索词，目标粗筛 {target_count} 条")
     with sync_playwright() as playwright:
@@ -323,12 +367,13 @@ def search_bilibili(
         page.set_default_timeout(settings.browser_timeout_ms)
         try:
             for query in queries:
-                if len(dedupe_candidates(accepted)) >= target_count:
+                if len(prechecked_candidates(accepted, target_count)) >= target_count:
                     break
                 for page_number in range(1, settings.max_search_pages + 1):
-                    if len(dedupe_candidates(accepted)) >= target_count:
+                    if len(prechecked_candidates(accepted, target_count)) >= target_count:
                         break
-                    emit("QUERYING", min(90, 8 + len(dedupe_candidates(accepted)) * 75 // max(target_count, 1)), f"搜索：{query} / 第 {page_number} 页")
+                    unique_count = len(prechecked_candidates(accepted, target_count))
+                    emit("QUERYING", min(90, 8 + unique_count * 75 // max(target_count, 1)), f"搜索：{query} / 第 {page_number} 页")
                     page.goto(
                         f"https://search.bilibili.com/video?keyword={quote_plus(query)}&page={page_number}",
                         wait_until="domcontentloaded",
@@ -369,19 +414,33 @@ def search_bilibili(
                         break
                     for candidate in new_candidates:
                         processed += 1
-                        emit("ENRICHING", min(92, 10 + len(dedupe_candidates(accepted)) * 76 // max(target_count, 1)), f"补充视频信息：{candidate.title[:32]}")
+                        unique_count = len(prechecked_candidates(accepted, target_count))
+                        emit("ENRICHING", min(92, 10 + unique_count * 76 // max(target_count, 1)), f"补充视频信息：{candidate.title[:32]}")
                         enrich_candidate(context, candidate, settings, point, query)
-                        score_candidate(candidate, point, keyword or query)
-                        if is_candidate_accepted(candidate):
+                        candidate.raw["search_query"] = query
+                        candidate.raw["search_page"] = page_number
+                        candidate.raw["comments"] = candidate.comments
+                        if should_skip_multipart_candidate(candidate):
+                            emit("PRECHECKING", min(94, 12 + unique_count * 78 // max(target_count, 1)), f"跳过合集：未定位到匹配分集 {candidate.title[:32]}")
+                            continue
+                        result = refresh_candidate_precheck(
+                            candidate,
+                            scoring_keyword,
+                            settings.rules_path,
+                            settings.max_duration_seconds,
+                            knowledge_context,
+                        )
+                        apply_precheck(candidate, result)
+                        if result.accepted:
                             accepted.append(candidate)
-                            accepted = dedupe_candidates(accepted)
-                            emit("PRECHECKING", min(94, 12 + len(accepted) * 78 // max(target_count, 1)), f"通过粗筛 {len(accepted)}/{target_count}")
+                            unique = prechecked_candidates(accepted, target_count)
+                            emit("DEDUPING", min(94, 12 + len(unique) * 78 // max(target_count, 1)), f"通过粗筛并去重 {len(unique)}/{target_count}")
         finally:
             context.close()
             browser.close()
-    accepted = dedupe_candidates(accepted)[:target_count]
-    emit("COMPLETED", 100, f"粗筛完成，共 {len(accepted)} 条候选")
-    return accepted
+    unique = prechecked_candidates(accepted, target_count)[:target_count]
+    emit("COMPLETED", 100, f"粗筛完成，共 {len(unique)} 条候选")
+    return unique
 
 
 def domain_matches(cookie_domain: str, host: str) -> bool:

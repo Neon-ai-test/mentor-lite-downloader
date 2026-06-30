@@ -27,43 +27,19 @@
           </div>
         </section>
 
-        <section class="panel">
-          <header>
-            <span>KNOWLEDGE</span>
-            <strong id="knowledgeCount">0</strong>
-          </header>
-          <label>学科</label>
-          <input id="manualSubject" value="数学" />
-          <label>学段</label>
-          <input id="manualStage" value="初中" />
-          <label>年级</label>
-          <input id="manualGrade" value="九年级" />
-          <label>教材</label>
-          <input id="manualTextbook" value="人教版" />
-          <label>章节</label>
-          <input id="manualChapter" />
-          <label>一级知识点</label>
-          <input id="manualGroup" />
-          <label>二级知识点</label>
-          <input id="manualName" />
-          <button id="manualSave">录入知识点</button>
-        </section>
-
-        <section class="panel">
-          <header>
-            <span>IMPORT</span>
-            <strong>Excel/CSV</strong>
-          </header>
-          <input id="importFile" type="file" accept=".xlsx,.xlsm,.csv" />
-          <button id="importSubmit">导入知识点表</button>
-        </section>
+        <nav class="nav">
+          <button class="nav-btn active" data-view="workbench">粗筛下载</button>
+          <button class="nav-btn" data-view="knowledge">知识点管理</button>
+          <button class="nav-btn" data-view="tasks">任务管理</button>
+          <button class="nav-btn" data-view="candidates">候选库管理</button>
+        </nav>
       </aside>
 
       <section class="content">
         <header class="topbar">
           <div>
             <span>MENTOR ROUGH SCREEN</span>
-            <h1>粗筛 100 与批量下载</h1>
+            <h1 id="viewTitle">粗筛下载</h1>
           </div>
           <div class="stats">
             <article><span>知识点</span><strong id="statKnowledge">0</strong></article>
@@ -73,53 +49,199 @@
           </div>
         </header>
 
-        <section class="taskbar">
-          <select id="knowledgeSelect"></select>
-          <input id="keywordInput" placeholder="搜索词默认使用知识点名称" />
-          <input id="targetInput" type="number" min="1" max="200" value="100" />
-          <button id="startTask">开始粗筛</button>
-        </section>
-
-        <section class="grid">
-          <div class="card">
+        <section id="view-workbench" class="view active">
+          <section class="card">
             <div class="card-head">
-              <div><span>TASKS</span><h2>任务</h2></div>
-              <button id="refreshBtn" class="ghost">刷新</button>
+              <div><span>NEW TASK</span><h2>新建粗筛任务</h2></div>
             </div>
-            <div id="taskList" class="task-list"></div>
-          </div>
+            <div class="task-filters">
+              <select id="taskSubjectFilter"></select>
+              <select id="taskGradeFilter"></select>
+              <input id="taskKnowledgeSearch" placeholder="按章节、一级或二级知识点搜索" />
+              <select id="knowledgeSelect"></select>
+              <input id="keywordInput" placeholder="搜索词默认使用知识点名称" />
+              <input id="targetInput" type="number" min="1" max="200" value="100" />
+              <button id="startTask">开始粗筛</button>
+            </div>
+          </section>
 
-          <div class="card candidate-card">
-            <div class="card-head">
-              <div><span>CANDIDATES</span><h2>候选视频</h2></div>
-              <div class="row">
-                <button id="downloadSelected">下载选中</button>
-                <button id="downloadAll" class="ghost">下载当前任务未完成</button>
+          <section class="grid">
+            <div class="card">
+              <div class="card-head">
+                <div><span>CURRENT TASKS</span><h2>近期任务</h2></div>
+                <button id="refreshBtn" class="ghost">刷新</button>
+              </div>
+              <div id="taskList" class="task-list"></div>
+            </div>
+
+            <div class="card candidate-card">
+              <div class="card-head">
+                <div><span>CURRENT CANDIDATES</span><h2>当前任务候选</h2></div>
+                <div class="row">
+                  <button id="downloadSelected">下载选中</button>
+                  <button id="downloadAll" class="ghost">下载当前任务未完成</button>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th class="check"><input id="selectAll" type="checkbox" /></th>
+                      <th>排序</th>
+                      <th>视频</th>
+                      <th>作者</th>
+                      <th>时长</th>
+                      <th>播放</th>
+                      <th>粗筛</th>
+                      <th>下载</th>
+                    </tr>
+                  </thead>
+                  <tbody id="workbenchCandidateBody"></tbody>
+                </table>
               </div>
             </div>
-            <div class="table-wrap">
+          </section>
+        </section>
+
+        <section id="view-knowledge" class="view">
+          <section class="management-grid">
+            <div class="card">
+              <div class="card-head">
+                <div><span>KNOWLEDGE MANAGER</span><h2>知识点管理</h2></div>
+                <div class="row">
+                  <button id="deleteSelectedKnowledge" class="ghost danger">删除选中</button>
+                  <button id="newKnowledge" class="ghost">新建知识点</button>
+                </div>
+              </div>
+              <div class="list-filters">
+                <select id="knowledgeSubjectFilter"></select>
+                <select id="knowledgeGradeFilter"></select>
+                <input id="knowledgeSearch" placeholder="搜索章节、一级或二级知识点" />
+              </div>
+              <div class="table-wrap manager-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th class="check"><input id="knowledgeSelectAll" type="checkbox" /></th>
+                      <th>知识点</th>
+                      <th>学科</th>
+                      <th>年级</th>
+                      <th>教材</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="knowledgeBody"></tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="stack">
+              <div class="card">
+                <div class="card-head">
+                  <div><span>EDITOR</span><h2 id="knowledgeFormTitle">新建知识点</h2></div>
+                </div>
+                <div class="form-grid">
+                  <label>学科<input id="knowledgeSubject" value="数学" /></label>
+                  <label>学段<input id="knowledgeStage" value="初中" /></label>
+                  <label>年级<input id="knowledgeGrade" value="九年级" /></label>
+                  <label>教材<input id="knowledgeTextbook" value="人教版" /></label>
+                  <label>章节<input id="knowledgeChapter" /></label>
+                  <label>一级知识点<input id="knowledgeGroup" /></label>
+                  <label>二级知识点<input id="knowledgeName" /></label>
+                  <label>别名<input id="knowledgeAliases" placeholder="多个别名用逗号分隔" /></label>
+                  <label class="wide">描述<input id="knowledgeDescription" /></label>
+                </div>
+                <div class="row form-actions">
+                  <button id="knowledgeSave">保存</button>
+                  <button id="knowledgeCancelEdit" class="ghost hidden">取消编辑</button>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-head">
+                  <div><span>IMPORT</span><h2>导入知识点表</h2></div>
+                </div>
+                <div class="import-defaults">
+                  <input id="importSubject" value="数学" placeholder="学科" />
+                  <input id="importStage" value="初中" placeholder="学段" />
+                  <input id="importGrade" value="九年级" placeholder="年级" />
+                  <input id="importTextbook" value="人教版" placeholder="教材" />
+                </div>
+                <input id="importFile" type="file" accept=".xlsx,.xlsm,.csv" />
+                <div class="row">
+                  <button id="importPreviewBtn">预览字段</button>
+                  <button id="importCommit" class="ghost" disabled>确认导入</button>
+                </div>
+                <div id="importPreview" class="import-preview hidden"></div>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section id="view-tasks" class="view">
+          <section class="card">
+            <div class="card-head">
+              <div><span>TASK MANAGER</span><h2>任务管理</h2></div>
+              <div class="row">
+                <button id="refreshTasks" class="ghost">刷新</button>
+                <button id="clearFinishedTasks" class="ghost">清理已结束</button>
+              </div>
+            </div>
+            <div class="table-wrap manager-table">
               <table>
                 <thead>
                   <tr>
-                    <th class="check"><input id="selectAll" type="checkbox" /></th>
-                    <th>排序</th>
+                    <th>任务</th>
+                    <th>状态</th>
+                    <th>进度</th>
+                    <th>候选</th>
+                    <th>创建时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="taskManagerBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="view-candidates" class="view">
+          <section class="card">
+            <div class="card-head">
+              <div><span>CANDIDATE LIBRARY</span><h2>候选库管理</h2></div>
+              <div class="row">
+                <button id="candidateDownloadSelected">下载选中</button>
+                <button id="deleteSelectedCandidates" class="ghost">删除选中</button>
+                <button id="clearCandidates" class="ghost">清空当前范围</button>
+              </div>
+            </div>
+            <div class="list-filters candidate-filters">
+              <select id="candidateTaskFilter"></select>
+              <input id="candidateSearch" placeholder="搜索标题、作者、知识点" />
+            </div>
+            <div class="table-wrap library-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th class="check"><input id="librarySelectAll" type="checkbox" /></th>
+                    <th>任务/知识点</th>
                     <th>视频</th>
                     <th>作者</th>
-                    <th>时长</th>
                     <th>播放</th>
                     <th>粗筛</th>
                     <th>下载</th>
+                    <th>操作</th>
                   </tr>
                 </thead>
                 <tbody id="candidateBody"></tbody>
               </table>
             </div>
-          </div>
+          </section>
         </section>
       </section>
     </main>
 
     <div id="toast" class="toast"></div>
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260630-knowledge-bulk"></script>
   </body>
 </html>

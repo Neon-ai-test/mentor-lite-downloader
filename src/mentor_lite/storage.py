@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS candidate (
     view_count INTEGER NOT NULL DEFAULT 0,
     like_count INTEGER NOT NULL DEFAULT 0,
     comment_count INTEGER NOT NULL DEFAULT 0,
+    share_count INTEGER NOT NULL DEFAULT 0,
     favorite_count INTEGER NOT NULL DEFAULT 0,
     danmaku_count INTEGER NOT NULL DEFAULT 0,
     precheck_score REAL NOT NULL DEFAULT 0,
@@ -90,6 +91,12 @@ class Repository:
     def initialize(self) -> None:
         with closing(self.connect()) as connection:
             connection.executescript(SCHEMA)
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(candidate)").fetchall()
+            }
+            if "share_count" not in columns:
+                connection.execute("ALTER TABLE candidate ADD COLUMN share_count INTEGER NOT NULL DEFAULT 0")
             connection.commit()
             connection.execute(
                 "UPDATE task SET status = 'FAILED', stage = 'FAILED', message = ? WHERE status = 'RUNNING'",
@@ -159,6 +166,19 @@ class Repository:
             with connection:
                 cursor = connection.execute("DELETE FROM knowledge_point WHERE id = ?", (point_id,))
                 return cursor.rowcount > 0
+
+    def delete_knowledge_many(self, point_ids: list[str]) -> int:
+        unique_ids = list(dict.fromkeys(point_id for point_id in point_ids if point_id))
+        if not unique_ids:
+            return 0
+        placeholders = ",".join("?" for _ in unique_ids)
+        with closing(self.connect()) as connection:
+            with connection:
+                cursor = connection.execute(
+                    f"DELETE FROM knowledge_point WHERE id IN ({placeholders})",
+                    tuple(unique_ids),
+                )
+                return cursor.rowcount
 
     def create_task(self, task_id: str, knowledge_point_id: str, keyword: str, target_count: int) -> None:
         now = utc_now()
@@ -243,6 +263,48 @@ class Repository:
             ).fetchone()
         return dict(row) if row else None
 
+    def delete_task(self, task_id: str) -> int:
+        with closing(self.connect()) as connection:
+            with connection:
+                candidate_count = connection.execute(
+                    "SELECT COUNT(*) AS count FROM candidate WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()["count"]
+                task_cursor = connection.execute("DELETE FROM task WHERE id = ?", (task_id,))
+                if task_cursor.rowcount:
+                    connection.execute("DELETE FROM candidate WHERE task_id = ?", (task_id,))
+                    return int(candidate_count)
+                return 0
+
+    def clear_tasks(self, statuses: set[str] | None = None) -> dict[str, int]:
+        with closing(self.connect()) as connection:
+            with connection:
+                if statuses:
+                    placeholders = ",".join("?" for _ in statuses)
+                    task_rows = connection.execute(
+                        f"SELECT id FROM task WHERE status IN ({placeholders})",
+                        tuple(statuses),
+                    ).fetchall()
+                else:
+                    task_rows = connection.execute("SELECT id FROM task").fetchall()
+                task_ids = [str(row["id"]) for row in task_rows]
+                if not task_ids:
+                    return {"tasks": 0, "candidates": 0}
+                placeholders = ",".join("?" for _ in task_ids)
+                candidate_count = connection.execute(
+                    f"SELECT COUNT(*) AS count FROM candidate WHERE task_id IN ({placeholders})",
+                    tuple(task_ids),
+                ).fetchone()["count"]
+                connection.execute(
+                    f"DELETE FROM candidate WHERE task_id IN ({placeholders})",
+                    tuple(task_ids),
+                )
+                cursor = connection.execute(
+                    f"DELETE FROM task WHERE id IN ({placeholders})",
+                    tuple(task_ids),
+                )
+                return {"tasks": cursor.rowcount, "candidates": int(candidate_count)}
+
     def save_candidates(self, task_id: str, candidates: list[Candidate]) -> int:
         now = utc_now()
         saved = 0
@@ -254,10 +316,10 @@ class Repository:
                         """INSERT OR IGNORE INTO candidate
                            (task_id, rank, source, external_id, canonical_url, title, author,
                             duration_seconds, description, cover_url, published_at, view_count,
-                            like_count, comment_count, favorite_count, danmaku_count,
+                            like_count, comment_count, share_count, favorite_count, danmaku_count,
                             precheck_score, precheck_reason, score_json, comments_json, raw_json,
                             created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             task_id,
                             rank,
@@ -273,6 +335,7 @@ class Repository:
                             candidate.view_count,
                             candidate.like_count,
                             candidate.comment_count,
+                            candidate.share_count,
                             candidate.favorite_count,
                             candidate.danmaku_count,
                             candidate.precheck_score,
@@ -319,6 +382,21 @@ class Repository:
                 (candidate_id,),
             ).fetchone()
         return candidate_row_to_dict(row) if row else None
+
+    def delete_candidate(self, candidate_id: int) -> bool:
+        with closing(self.connect()) as connection:
+            with connection:
+                cursor = connection.execute("DELETE FROM candidate WHERE id = ?", (candidate_id,))
+                return cursor.rowcount > 0
+
+    def clear_candidates(self, task_id: str | None = None) -> int:
+        with closing(self.connect()) as connection:
+            with connection:
+                if task_id:
+                    cursor = connection.execute("DELETE FROM candidate WHERE task_id = ?", (task_id,))
+                else:
+                    cursor = connection.execute("DELETE FROM candidate")
+                return cursor.rowcount
 
     def update_download(
         self,
