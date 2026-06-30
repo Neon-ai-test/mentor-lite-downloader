@@ -1,0 +1,392 @@
+from __future__ import annotations
+
+import base64
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+from threading import Lock, Thread
+from typing import Any
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from mentor_lite.bilibili import auth_summary, search_bilibili
+from mentor_lite.downloader import download_bilibili_flat
+from mentor_lite.knowledge import import_knowledge_file, make_knowledge_point
+from mentor_lite.settings import Settings
+from mentor_lite.storage import Repository
+
+settings = Settings.from_env()
+settings.ensure_dirs()
+repository = Repository(settings.db_path)
+repository.initialize()
+
+active_task_ids: set[str] = set()
+active_candidate_ids: set[int] = set()
+active_lock = Lock()
+
+app = FastAPI(
+    title="MENTOR Lite Downloader",
+    version="0.1.0",
+    description="Standalone rough-screening and Bilibili download tool",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+STATIC_DIR = settings.root / "static"
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+class KnowledgePayload(BaseModel):
+    subject: str = Field(min_length=1, max_length=80)
+    stage: str = Field(default="", max_length=80)
+    grade: str = Field(default="", max_length=80)
+    textbook: str = Field(default="", max_length=120)
+    chapter: str = Field(default="", max_length=200)
+    group: str = Field(default="", max_length=200)
+    name: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=1000)
+    aliases: list[str] = Field(default_factory=list, max_length=30)
+
+
+class TaskPayload(BaseModel):
+    knowledge_point_id: str = Field(min_length=1, max_length=120)
+    keyword: str = Field(default="", max_length=200)
+    target_count: int = Field(default=100, ge=1, le=200)
+
+
+class DownloadPayload(BaseModel):
+    candidate_ids: list[int] = Field(min_length=1, max_length=100)
+
+
+class KnowledgeImportPayload(BaseModel):
+    filename: str = Field(min_length=1, max_length=260)
+    content_base64: str = Field(min_length=1)
+    subject: str = Field(min_length=1, max_length=80)
+    stage: str = Field(default="", max_length=80)
+    grade: str = Field(default="", max_length=80)
+    textbook: str = Field(default="", max_length=120)
+
+
+def model_data(model: BaseModel) -> dict[str, Any]:
+    dump = getattr(model, "model_dump", None)
+    if callable(dump):
+        return dump()
+    return model.dict()
+
+
+def task_running(task_id: str) -> bool:
+    with active_lock:
+        return task_id in active_task_ids
+
+
+def candidate_downloading(candidate_id: int) -> bool:
+    with active_lock:
+        return candidate_id in active_candidate_ids
+
+
+def run_discovery_task(task_id: str, point_id: str, keyword: str, target_count: int) -> None:
+    point = repository.get_knowledge(point_id)
+    if point is None:
+        repository.update_task(
+            task_id,
+            status="FAILED",
+            stage="FAILED",
+            percent=100,
+            message="知识点不存在",
+        )
+        return
+
+    def progress(stage: str, percent: int, message: str, processed: int, qualified: int) -> None:
+        repository.update_task(
+            task_id,
+            stage=stage,
+            percent=percent,
+            message=message,
+            processed_count=processed,
+            qualified_count=qualified,
+        )
+
+    try:
+        candidates = search_bilibili(
+            settings,
+            point,
+            keyword=keyword,
+            target_count=target_count,
+            progress=progress,
+        )
+        saved = repository.save_candidates(task_id, candidates)
+        status = "COMPLETED" if saved >= target_count else "PARTIAL"
+        repository.update_task(
+            task_id,
+            status=status,
+            stage=status,
+            percent=100,
+            message=f"粗筛完成，保存 {saved}/{target_count} 条候选",
+            qualified_count=saved,
+        )
+    except Exception as exc:
+        repository.update_task(
+            task_id,
+            status="FAILED",
+            stage="FAILED",
+            percent=100,
+            message=str(exc)[:500],
+        )
+    finally:
+        with active_lock:
+            active_task_ids.discard(task_id)
+
+
+def run_download_batch(candidate_ids: list[int]) -> None:
+    for candidate_id in candidate_ids:
+        row = repository.get_candidate(candidate_id)
+        if row is None:
+            continue
+        with active_lock:
+            if candidate_id in active_candidate_ids:
+                continue
+            active_candidate_ids.add(candidate_id)
+        try:
+            repository.update_download(
+                candidate_id,
+                status="DOWNLOADING",
+                stage="QUEUED",
+                percent=0,
+                message="下载已排队",
+            )
+
+            def progress(percent: int, stage: str, message: str) -> None:
+                repository.update_download(
+                    candidate_id,
+                    status="DOWNLOADING",
+                    stage=stage,
+                    percent=percent,
+                    message=message,
+                )
+
+            report = download_bilibili_flat(
+                settings,
+                str(row["canonical_url"] or row["external_id"]),
+                knowledge_name=str(row["knowledge_name"] or row["task_keyword"] or "未命名知识点"),
+                video_title=str(row["title"] or row["external_id"]),
+                progress=progress,
+            )
+            repository.update_download(
+                candidate_id,
+                status="COMPLETED",
+                stage="COMPLETED",
+                percent=100,
+                message=f"下载完成：{report.get('selected_label') or ''}".strip(),
+                media_file=str(report.get("main_file") or ""),
+            )
+        except Exception as exc:
+            repository.update_download(
+                candidate_id,
+                status="FAILED",
+                stage="FAILED",
+                percent=0,
+                message=str(exc)[:500],
+            )
+        finally:
+            with active_lock:
+                active_candidate_ids.discard(candidate_id)
+
+
+def background_options() -> dict[str, Any]:
+    options: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return options
+
+
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/api/health")
+def health() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "root": str(settings.root),
+        "db": str(settings.db_path),
+        "downloads": str(settings.download_dir),
+    }
+
+
+@app.get("/api/summary")
+def summary() -> dict[str, Any]:
+    tasks = repository.list_tasks(200)
+    candidates = repository.list_candidates(limit=500)
+    return {
+        "knowledge_count": len(repository.list_knowledge()),
+        "task_count": len(tasks),
+        "candidate_count": len(candidates),
+        "running_count": sum(1 for item in tasks if item["status"] == "RUNNING"),
+        "downloading_count": sum(1 for item in candidates if item["download_status"] == "DOWNLOADING"),
+        "download_root": str(settings.download_dir),
+    }
+
+
+@app.get("/api/auth")
+def get_auth(live: bool = Query(default=False)) -> dict[str, Any]:
+    return auth_summary(settings, live=live)
+
+
+@app.post("/api/auth/start")
+def start_auth() -> dict[str, Any]:
+    settings.auth_state_path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "mentor_lite.authorize",
+            "--output",
+            str(settings.auth_state_path),
+        ],
+        cwd=str(settings.root),
+        **background_options(),
+    )
+    return {"started": True, "message": "授权浏览器已打开，请在新窗口完成 B站登录"}
+
+
+@app.delete("/api/auth")
+def clear_auth() -> dict[str, Any]:
+    removed = False
+    if settings.auth_state_path.exists():
+        settings.auth_state_path.unlink()
+        removed = True
+    return {"cleared": removed, "auth": auth_summary(settings)}
+
+
+@app.get("/api/knowledge")
+def list_knowledge() -> list[dict[str, Any]]:
+    return repository.list_knowledge()
+
+
+@app.post("/api/knowledge")
+def create_knowledge(payload: KnowledgePayload) -> dict[str, Any]:
+    try:
+        point = make_knowledge_point(model_data(payload))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    repository.upsert_knowledge(point)
+    saved = next((item for item in repository.list_knowledge() if item["id"] == point.id), None)
+    return {"saved": True, "knowledge": saved}
+
+
+@app.delete("/api/knowledge/{point_id}")
+def delete_knowledge(point_id: str) -> dict[str, Any]:
+    return {"deleted": repository.delete_knowledge(point_id)}
+
+
+@app.post("/api/knowledge/import")
+def import_knowledge(payload: KnowledgeImportPayload) -> dict[str, Any]:
+    suffix = Path(payload.filename or "knowledge.xlsx").suffix.lower()
+    if suffix not in {".xlsx", ".xlsm", ".csv"}:
+        raise HTTPException(status_code=400, detail="仅支持 .xlsx、.xlsm 或 .csv")
+    upload_dir = settings.runtime_dir / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    upload_path = upload_dir / f"{uuid.uuid4().hex}{suffix}"
+    try:
+        upload_path.write_bytes(base64.b64decode(payload.content_base64, validate=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="上传文件不是有效的 Base64 内容") from exc
+    try:
+        points = import_knowledge_file(
+            upload_path,
+            subject=payload.subject,
+            stage=payload.stage,
+            grade=payload.grade,
+            textbook=payload.textbook,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    for point in points:
+        repository.upsert_knowledge(point)
+    return {"imported_count": len(points), "knowledge_count": len(repository.list_knowledge())}
+
+
+@app.post("/api/tasks", status_code=202)
+def create_task(payload: TaskPayload) -> dict[str, Any]:
+    point = repository.get_knowledge(payload.knowledge_point_id)
+    if point is None:
+        raise HTTPException(status_code=404, detail="知识点不存在")
+    task_id = uuid.uuid4().hex
+    keyword = payload.keyword.strip() or point.name
+    repository.create_task(task_id, point.id, keyword, payload.target_count)
+    with active_lock:
+        active_task_ids.add(task_id)
+    Thread(
+        target=run_discovery_task,
+        args=(task_id, point.id, keyword, payload.target_count),
+        daemon=True,
+    ).start()
+    return {"task_id": task_id, "status": "RUNNING"}
+
+
+@app.get("/api/tasks")
+def list_tasks(limit: int = Query(default=30, ge=1, le=200)) -> list[dict[str, Any]]:
+    return repository.list_tasks(limit)
+
+
+@app.get("/api/tasks/{task_id}")
+def get_task(task_id: str) -> dict[str, Any]:
+    task = repository.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    task["active"] = task_running(task_id)
+    return task
+
+
+@app.get("/api/candidates")
+def list_candidates(
+    task_id: str | None = None,
+    limit: int = Query(default=200, ge=1, le=500),
+) -> list[dict[str, Any]]:
+    rows = repository.list_candidates(task_id=task_id, limit=limit)
+    for row in rows:
+        row["downloading"] = candidate_downloading(int(row["id"]))
+    return rows
+
+
+@app.post("/api/candidates/download", status_code=202)
+def download_candidates(payload: DownloadPayload) -> dict[str, Any]:
+    unique_ids = list(dict.fromkeys(int(item) for item in payload.candidate_ids))
+    Thread(target=run_download_batch, args=(unique_ids,), daemon=True).start()
+    return {"started": len(unique_ids), "candidate_ids": unique_ids}
+
+
+@app.post("/api/candidates/{candidate_id}/download", status_code=202)
+def download_candidate(candidate_id: int) -> dict[str, Any]:
+    Thread(target=run_download_batch, args=([candidate_id],), daemon=True).start()
+    return {"started": 1, "candidate_ids": [candidate_id]}
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    args = parser.parse_args()
+    uvicorn.run("mentor_lite.api:app", host=args.host, port=args.port, reload=False)
+
+
+if __name__ == "__main__":
+    main()

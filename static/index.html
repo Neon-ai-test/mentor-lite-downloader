@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MENTOR 粗筛下载工具</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <aside class="side">
+        <div class="brand">
+          <strong>MENTOR Lite</strong>
+          <span>粗筛下载</span>
+        </div>
+
+        <section class="panel">
+          <header>
+            <span>BILIBILI</span>
+            <strong id="authText">未检测</strong>
+          </header>
+          <p id="authDetail">等待检测登录态</p>
+          <div class="row">
+            <button id="authStart">登录</button>
+            <button id="authCheck">检查</button>
+            <button id="authClear" class="ghost">清除</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <header>
+            <span>KNOWLEDGE</span>
+            <strong id="knowledgeCount">0</strong>
+          </header>
+          <label>学科</label>
+          <input id="manualSubject" value="数学" />
+          <label>学段</label>
+          <input id="manualStage" value="初中" />
+          <label>年级</label>
+          <input id="manualGrade" value="九年级" />
+          <label>教材</label>
+          <input id="manualTextbook" value="人教版" />
+          <label>章节</label>
+          <input id="manualChapter" />
+          <label>一级知识点</label>
+          <input id="manualGroup" />
+          <label>二级知识点</label>
+          <input id="manualName" />
+          <button id="manualSave">录入知识点</button>
+        </section>
+
+        <section class="panel">
+          <header>
+            <span>IMPORT</span>
+            <strong>Excel/CSV</strong>
+          </header>
+          <input id="importFile" type="file" accept=".xlsx,.xlsm,.csv" />
+          <button id="importSubmit">导入知识点表</button>
+        </section>
+      </aside>
+
+      <section class="content">
+        <header class="topbar">
+          <div>
+            <span>MENTOR ROUGH SCREEN</span>
+            <h1>粗筛 100 与批量下载</h1>
+          </div>
+          <div class="stats">
+            <article><span>知识点</span><strong id="statKnowledge">0</strong></article>
+            <article><span>任务</span><strong id="statTasks">0</strong></article>
+            <article><span>候选</span><strong id="statCandidates">0</strong></article>
+            <article><span>下载中</span><strong id="statDownloading">0</strong></article>
+          </div>
+        </header>
+
+        <section class="taskbar">
+          <select id="knowledgeSelect"></select>
+          <input id="keywordInput" placeholder="搜索词默认使用知识点名称" />
+          <input id="targetInput" type="number" min="1" max="200" value="100" />
+          <button id="startTask">开始粗筛</button>
+        </section>
+
+        <section class="grid">
+          <div class="card">
+            <div class="card-head">
+              <div><span>TASKS</span><h2>任务</h2></div>
+              <button id="refreshBtn" class="ghost">刷新</button>
+            </div>
+            <div id="taskList" class="task-list"></div>
+          </div>
+
+          <div class="card candidate-card">
+            <div class="card-head">
+              <div><span>CANDIDATES</span><h2>候选视频</h2></div>
+              <div class="row">
+                <button id="downloadSelected">下载选中</button>
+                <button id="downloadAll" class="ghost">下载当前任务未完成</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th class="check"><input id="selectAll" type="checkbox" /></th>
+                    <th>排序</th>
+                    <th>视频</th>
+                    <th>作者</th>
+                    <th>时长</th>
+                    <th>播放</th>
+                    <th>粗筛</th>
+                    <th>下载</th>
+                  </tr>
+                </thead>
+                <tbody id="candidateBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

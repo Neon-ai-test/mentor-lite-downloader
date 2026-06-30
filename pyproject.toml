@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mentor-lite-downloader"
+version = "0.1.0"
+description = "Standalone MENTOR rough-screening and Bilibili download tool"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
+  "playwright>=1.52,<2",
+  "openpyxl>=3.1,<4",
+  "imageio-ffmpeg>=0.6,<1",
+]
+
+[project.scripts]
+mentor-lite = "mentor_lite.api:main"
+mentor-lite-auth = "mentor_lite.authorize:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mentor_lite"]

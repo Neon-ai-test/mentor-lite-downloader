@@ -1,0 +1,6 @@
+.runtime/
+data/
+downloads/
+release/
+__pycache__/
+*.pyc
