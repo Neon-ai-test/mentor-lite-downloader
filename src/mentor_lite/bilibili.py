@@ -341,6 +341,7 @@ def search_bilibili(
     *,
     keyword: str = "",
     target_count: int = 100,
+    max_duration_seconds: int | None = None,
     progress: ProgressCallback | None = None,
 ) -> list[Candidate]:
     from playwright.sync_api import sync_playwright
@@ -351,12 +352,19 @@ def search_bilibili(
     accepted: list[Candidate] = []
     seen: set[str] = set()
     processed = 0
+    duration_limit_text = (
+        "不限时长"
+        if max_duration_seconds == 0
+        else f"时长≤{max_duration_seconds / 60:g}分钟"
+        if max_duration_seconds is not None
+        else "默认时长上限"
+    )
 
     def emit(stage: str, percent: int, message: str) -> None:
         if progress:
             progress(stage, percent, message, processed, len(prechecked_candidates(accepted, target_count)))
 
-    emit("PREPARING", 5, f"生成 {len(queries)} 组搜索词，目标粗筛 {target_count} 条")
+    emit("PREPARING", 5, f"生成 {len(queries)} 组搜索词，目标粗筛 {target_count} 条，{duration_limit_text}")
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=settings.headless)
         context_kwargs: dict[str, Any] = {"user_agent": settings.user_agent, "locale": "zh-CN"}
@@ -427,7 +435,7 @@ def search_bilibili(
                             candidate,
                             scoring_keyword,
                             settings.rules_path,
-                            settings.max_duration_seconds,
+                            max_duration_seconds,
                             knowledge_context,
                         )
                         apply_precheck(candidate, result)

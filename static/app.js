@@ -18,6 +18,8 @@ const state = {
   knowledgeSearch: '',
   candidateTaskFilter: 'all',
   candidateSearch: '',
+  taskMaxDurationMinutes: 15,
+  taskMaxDurationInitialized: false,
   importPreview: null,
   importMapping: {},
 }
@@ -59,6 +61,15 @@ function formatDuration(seconds) {
   const s = total % 60
   if (h) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
   return `${m}:${String(s).padStart(2, '0')}`
+}
+
+function formatDurationLimit(seconds) {
+  if (seconds === null || seconds === undefined || seconds === '') return '默认'
+  const total = Number(seconds)
+  if (!Number.isFinite(total)) return '默认'
+  if (total <= 0) return '不限'
+  const minutes = total / 60
+  return Number.isInteger(minutes) ? `${minutes} 分钟` : `${minutes.toFixed(1)} 分钟`
 }
 
 function formatNumber(value) {
@@ -149,6 +160,8 @@ function renderSummary() {
   $('statTasks').textContent = state.summary.task_count || 0
   $('statCandidates').textContent = state.summary.candidate_count || 0
   $('statDownloading').textContent = state.summary.downloading_count || 0
+  $('downloadRoot').textContent = state.summary.download_root || 'downloads'
+  $('downloadRoot').title = state.summary.download_root || ''
 }
 
 function renderAuth() {
@@ -161,6 +174,7 @@ function renderTaskFilters() {
   $('taskSubjectFilter').innerHTML = selectOptions(uniqueValues(state.knowledge, 'subject'), state.taskSubjectFilter, '全部学科')
   $('taskGradeFilter').innerHTML = selectOptions(uniqueValues(state.knowledge, 'grade'), state.taskGradeFilter, '全部年级')
   $('taskKnowledgeSearch').value = state.taskKnowledgeSearch
+  $('maxDurationInput').value = state.taskMaxDurationMinutes
 
   const rows = filteredTaskKnowledge()
   if (!rows.some((item) => item.id === $('knowledgeSelect').value)) {
@@ -234,7 +248,7 @@ function renderTaskList() {
       <article class="task-item${active}" data-task-id="${escapeHtml(task.id)}">
         <div class="row">
           ${badge(task.status)}
-          <small>${task.candidate_count || 0} 条</small>
+          <small>${task.candidate_count || 0} 条 · 时长 ${escapeHtml(formatDurationLimit(task.max_duration_seconds))}</small>
         </div>
         <strong>${escapeHtml(task.knowledge_name || task.keyword)}</strong>
         <div class="progress"><i style="width:${percent}%"></i></div>
@@ -255,7 +269,7 @@ function renderTaskList() {
 function renderTaskManager() {
   const body = $('taskManagerBody')
   if (!state.tasks.length) {
-    body.innerHTML = '<tr><td colspan="6" class="empty">暂无任务</td></tr>'
+    body.innerHTML = '<tr><td colspan="7" class="empty">暂无任务</td></tr>'
     return
   }
   body.innerHTML = state.tasks.map((task) => {
@@ -275,6 +289,7 @@ function renderTaskManager() {
             <small>${percent}% · ${escapeHtml(task.message || task.stage || '')}</small>
           </div>
         </td>
+        <td>${escapeHtml(formatDurationLimit(task.max_duration_seconds))}</td>
         <td>${task.candidate_count || 0}</td>
         <td>${escapeHtml(task.created_at || '-')}</td>
         <td>
@@ -461,6 +476,28 @@ function renderImportPreview() {
   button.disabled = false
 }
 
+function clearImportPreview() {
+  state.importPreview = null
+  state.importMapping = {}
+  renderImportPreview()
+}
+
+function resetImportDialog() {
+  clearImportPreview()
+  $('importFile').value = ''
+}
+
+function openImportDialog() {
+  $('importDialog').classList.remove('hidden')
+  document.body.classList.add('modal-open')
+  window.setTimeout(() => $('importSubject').focus(), 0)
+}
+
+function closeImportDialog() {
+  $('importDialog').classList.add('hidden')
+  document.body.classList.remove('modal-open')
+}
+
 function renderAll() {
   renderSummary()
   renderAuth()
@@ -470,7 +507,6 @@ function renderAll() {
   renderTaskManager()
   renderWorkbenchCandidates()
   renderCandidateLibrary()
-  renderImportPreview()
 }
 
 async function refreshAll() {
@@ -484,6 +520,11 @@ async function refreshAll() {
   state.auth = auth
   state.knowledge = knowledge
   state.tasks = tasks
+  if (!state.taskMaxDurationInitialized) {
+    const seconds = Number(summary.max_duration_seconds ?? 15 * 60)
+    state.taskMaxDurationMinutes = Number.isFinite(seconds) ? Math.round(seconds / 60) : 15
+    state.taskMaxDurationInitialized = true
+  }
   if (state.selectedTaskId && !tasks.some((task) => task.id === state.selectedTaskId)) {
     state.selectedTaskId = ''
   }
@@ -662,10 +703,8 @@ async function commitKnowledgeImport() {
     }),
   })
   toast(`导入 ${result.imported_count} 个知识点`)
-  state.importPreview = null
-  state.importMapping = {}
-  $('importFile').value = ''
-  renderImportPreview()
+  resetImportDialog()
+  closeImportDialog()
   await refreshAll()
 }
 
@@ -676,6 +715,16 @@ async function startTask() {
     return
   }
   const target = Number($('targetInput').value || 100)
+  if (!Number.isFinite(target) || target < 1 || target > 500) {
+    toast('候选数量需为 1 到 500')
+    return
+  }
+  const maxDurationRaw = $('maxDurationInput').value.trim()
+  const maxDuration = maxDurationRaw === '' ? null : Number(maxDurationRaw)
+  if (maxDuration !== null && (!Number.isFinite(maxDuration) || maxDuration < 0 || maxDuration > 240)) {
+    toast('最大时长需为 0 到 240 分钟')
+    return
+  }
   const result = await api('/tasks', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -683,6 +732,7 @@ async function startTask() {
       knowledge_point_id: pointId,
       keyword: $('keywordInput').value.trim(),
       target_count: target,
+      max_duration_minutes: maxDuration,
     }),
   })
   state.selectedTaskId = result.task_id
@@ -716,6 +766,11 @@ async function downloadCandidate(id) {
   await api(`/candidates/${id}/download`, { method: 'POST' })
   toast('已加入下载队列')
   await refreshAll()
+}
+
+async function openDownloadDirectory() {
+  const result = await api('/downloads/open', { method: 'POST' })
+  toast(`已打开下载目录：${result.path}`)
 }
 
 async function downloadSelected() {
@@ -801,6 +856,7 @@ function bindEvents() {
     toast('授权状态已清除')
     await refreshAll()
   })
+  $('openDownloadDir').addEventListener('click', () => openDownloadDirectory().catch((error) => toast(error.message)))
   $('taskSubjectFilter').addEventListener('change', (event) => {
     state.taskSubjectFilter = event.target.value
     renderTaskFilters()
@@ -812,6 +868,9 @@ function bindEvents() {
   $('taskKnowledgeSearch').addEventListener('input', (event) => {
     state.taskKnowledgeSearch = event.target.value
     renderTaskFilters()
+  })
+  $('maxDurationInput').addEventListener('input', (event) => {
+    state.taskMaxDurationMinutes = event.target.value
   })
   $('knowledgeSubjectFilter').addEventListener('change', (event) => {
     state.knowledgeSubjectFilter = event.target.value
@@ -836,6 +895,9 @@ function bindEvents() {
   })
   $('newKnowledge').addEventListener('click', resetKnowledgeForm)
   $('deleteSelectedKnowledge').addEventListener('click', () => deleteSelectedKnowledge().catch((error) => toast(error.message)))
+  $('openImportDialog').addEventListener('click', openImportDialog)
+  $('closeImportDialog').addEventListener('click', closeImportDialog)
+  $('importDialogBackdrop').addEventListener('click', closeImportDialog)
   $('knowledgeSelectAll').addEventListener('change', (event) => {
     const rows = filteredKnowledgeManagerRows()
     state.selectedKnowledgeIds.clear()
@@ -846,8 +908,14 @@ function bindEvents() {
   })
   $('knowledgeSave').addEventListener('click', () => saveKnowledge().catch((error) => toast(error.message)))
   $('knowledgeCancelEdit').addEventListener('click', resetKnowledgeForm)
+  $('importFile').addEventListener('change', clearImportPreview)
   $('importPreviewBtn').addEventListener('click', () => previewKnowledgeImport().catch((error) => toast(error.message)))
   $('importCommit').addEventListener('click', () => commitKnowledgeImport().catch((error) => toast(error.message)))
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !$('importDialog').classList.contains('hidden')) {
+      closeImportDialog()
+    }
+  })
   $('startTask').addEventListener('click', () => startTask().catch((error) => toast(error.message)))
   $('refreshBtn').addEventListener('click', () => refreshAll().catch((error) => toast(error.message)))
   $('refreshTasks').addEventListener('click', () => refreshAll().catch((error) => toast(error.message)))

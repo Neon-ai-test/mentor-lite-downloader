@@ -27,6 +27,15 @@
           </div>
         </section>
 
+        <section class="panel">
+          <header>
+            <span>DOWNLOADS</span>
+            <strong>下载目录</strong>
+          </header>
+          <p id="downloadRoot" class="path-line">等待读取目录</p>
+          <button id="openDownloadDir">打开下载目录</button>
+        </section>
+
         <nav class="nav">
           <button class="nav-btn active" data-view="workbench">粗筛下载</button>
           <button class="nav-btn" data-view="knowledge">知识点管理</button>
@@ -50,18 +59,29 @@
         </header>
 
         <section id="view-workbench" class="view active">
-          <section class="card">
+          <section class="card task-create-card">
             <div class="card-head">
               <div><span>NEW TASK</span><h2>新建粗筛任务</h2></div>
             </div>
-            <div class="task-filters">
-              <select id="taskSubjectFilter"></select>
-              <select id="taskGradeFilter"></select>
-              <input id="taskKnowledgeSearch" placeholder="按章节、一级或二级知识点搜索" />
-              <select id="knowledgeSelect"></select>
-              <input id="keywordInput" placeholder="搜索词默认使用知识点名称" />
-              <input id="targetInput" type="number" min="1" max="200" value="100" />
-              <button id="startTask">开始粗筛</button>
+            <div class="task-builder">
+              <section class="task-section">
+                <div class="task-section-title">知识点范围</div>
+                <div class="task-form-grid scope-grid">
+                  <label class="task-field"><span>学科</span><select id="taskSubjectFilter"></select></label>
+                  <label class="task-field"><span>年级</span><select id="taskGradeFilter"></select></label>
+                  <label class="task-field wide"><span>目录搜索</span><input id="taskKnowledgeSearch" placeholder="章节、一级或二级知识点" /></label>
+                  <label class="task-field full"><span>知识点</span><select id="knowledgeSelect"></select></label>
+                </div>
+              </section>
+              <section class="task-section">
+                <div class="task-section-title">粗筛参数</div>
+                <div class="task-form-grid run-grid">
+                  <label class="task-field keyword-field"><span>搜索词</span><input id="keywordInput" placeholder="默认使用知识点名称" /></label>
+                  <label class="task-field"><span>候选数量</span><input id="targetInput" type="number" min="1" max="500" value="100" /></label>
+                  <label class="task-field"><span>最大时长（分钟）</span><input id="maxDurationInput" type="number" min="0" max="240" value="15" /></label>
+                  <div class="task-submit"><button id="startTask">开始粗筛</button></div>
+                </div>
+              </section>
             </div>
           </section>
 
@@ -109,6 +129,7 @@
               <div class="card-head">
                 <div><span>KNOWLEDGE MANAGER</span><h2>知识点管理</h2></div>
                 <div class="row">
+                  <button id="openImportDialog" class="ghost">导入知识点表</button>
                   <button id="deleteSelectedKnowledge" class="ghost danger">删除选中</button>
                   <button id="newKnowledge" class="ghost">新建知识点</button>
                 </div>
@@ -156,28 +177,6 @@
                   <button id="knowledgeCancelEdit" class="ghost hidden">取消编辑</button>
                 </div>
               </div>
-
-              <div class="card">
-                <div class="card-head">
-                  <div><span>IMPORT</span><h2>导入知识点表</h2></div>
-                </div>
-                <div class="import-defaults">
-                  <input id="importSubject" value="数学" placeholder="学科" />
-                  <input id="importStage" value="初中" placeholder="学段" />
-                  <input id="importGrade" value="九年级" placeholder="年级" />
-                  <input id="importTextbook" value="人教版" placeholder="教材" />
-                  <select id="importMode">
-                    <option value="append">追加到当前目录</option>
-                    <option value="replace">替换当前目录</option>
-                  </select>
-                </div>
-                <input id="importFile" type="file" accept=".xlsx,.xlsm,.csv" />
-                <div class="row">
-                  <button id="importPreviewBtn">预览字段</button>
-                  <button id="importCommit" class="ghost" disabled>确认导入</button>
-                </div>
-                <div id="importPreview" class="import-preview hidden"></div>
-              </div>
             </div>
           </section>
         </section>
@@ -198,6 +197,7 @@
                     <th>任务</th>
                     <th>状态</th>
                     <th>进度</th>
+                    <th>时长上限</th>
                     <th>候选</th>
                     <th>创建时间</th>
                     <th>操作</th>
@@ -245,7 +245,35 @@
       </section>
     </main>
 
+    <div id="importDialog" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="importDialogTitle">
+      <div id="importDialogBackdrop" class="modal-backdrop"></div>
+      <section class="modal-panel import-dialog">
+        <div class="modal-head">
+          <div><span>IMPORT</span><h2 id="importDialogTitle">导入知识点表</h2></div>
+          <button id="closeImportDialog" class="ghost">关闭</button>
+        </div>
+        <div class="import-defaults">
+          <input id="importSubject" value="数学" placeholder="学科" />
+          <input id="importStage" value="初中" placeholder="学段" />
+          <input id="importGrade" value="九年级" placeholder="年级" />
+          <input id="importTextbook" value="人教版" placeholder="教材" />
+          <select id="importMode">
+            <option value="append">追加到当前目录</option>
+            <option value="replace">替换当前目录</option>
+          </select>
+        </div>
+        <div class="import-file-row">
+          <input id="importFile" type="file" accept=".xlsx,.xlsm,.csv" />
+          <div class="row">
+            <button id="importPreviewBtn">预览字段</button>
+            <button id="importCommit" class="ghost" disabled>确认导入</button>
+          </div>
+        </div>
+        <div id="importPreview" class="import-preview hidden"></div>
+      </section>
+    </div>
+
     <div id="toast" class="toast"></div>
-    <script src="/static/app.js?v=20260630-main-import-order"></script>
+    <script src="/static/app.js?v=20260702-open-download-dir"></script>
   </body>
 </html>

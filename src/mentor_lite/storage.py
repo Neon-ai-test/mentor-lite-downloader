@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS task (
     knowledge_point_id TEXT NOT NULL,
     keyword TEXT NOT NULL,
     target_count INTEGER NOT NULL,
+    max_duration_seconds INTEGER,
     status TEXT NOT NULL,
     stage TEXT NOT NULL,
     progress_percent INTEGER NOT NULL DEFAULT 0,
@@ -98,6 +99,12 @@ class Repository:
             }
             if "share_count" not in candidate_columns:
                 connection.execute("ALTER TABLE candidate ADD COLUMN share_count INTEGER NOT NULL DEFAULT 0")
+            task_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(task)").fetchall()
+            }
+            if "max_duration_seconds" not in task_columns:
+                connection.execute("ALTER TABLE task ADD COLUMN max_duration_seconds INTEGER")
             knowledge_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(knowledge_point)").fetchall()
@@ -211,16 +218,23 @@ class Repository:
                 )
                 return cursor.rowcount
 
-    def create_task(self, task_id: str, knowledge_point_id: str, keyword: str, target_count: int) -> None:
+    def create_task(
+        self,
+        task_id: str,
+        knowledge_point_id: str,
+        keyword: str,
+        target_count: int,
+        max_duration_seconds: int | None,
+    ) -> None:
         now = utc_now()
         with closing(self.connect()) as connection:
             with connection:
                 connection.execute(
                     """INSERT INTO task
-                       (id, knowledge_point_id, keyword, target_count, status, stage,
+                       (id, knowledge_point_id, keyword, target_count, max_duration_seconds, status, stage,
                         progress_percent, message, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, 'RUNNING', 'PREPARING', 0, '任务已创建', ?, ?)""",
-                    (task_id, knowledge_point_id, keyword, target_count, now, now),
+                       VALUES (?, ?, ?, ?, ?, 'RUNNING', 'PREPARING', 0, '任务已创建', ?, ?)""",
+                    (task_id, knowledge_point_id, keyword, target_count, max_duration_seconds, now, now),
                 )
 
     def update_task(

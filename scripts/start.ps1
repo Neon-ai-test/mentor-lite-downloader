@@ -14,6 +14,7 @@ $logDir = Join-Path $runtimeDir "logs"
 $pidFile = Join-Path $runtimeDir "server.pid"
 $outLog = Join-Path $logDir "server.stdout.log"
 $errLog = Join-Path $logDir "server.stderr.log"
+$recordedPythonExe = $null
 
 function Write-Step([string]$Message) {
     Write-Host "[MENTOR-LITE] $Message" -ForegroundColor Cyan
@@ -77,13 +78,29 @@ function Stop-ExistingServer([int]$TargetPort) {
     }
 }
 
-New-Item -ItemType Directory -Force -Path $runtimeDir, $pipCache, $browserDir, $logDir | Out-Null
-$env:PIP_CACHE_DIR = $pipCache
-$env:PLAYWRIGHT_BROWSERS_PATH = $browserDir
-$env:MENTOR_LITE_ROOT = $root
+function Get-RecordedVenvPython {
+    $configPath = Join-Path $venvDir "pyvenv.cfg"
+    if (-not (Test-Path $configPath)) { return $null }
+    foreach ($line in Get-Content $configPath -ErrorAction SilentlyContinue) {
+        if ($line -match "^\s*executable\s*=\s*(.+?)\s*$") {
+            $candidate = $Matches[1]
+            if (Test-Path $candidate) { return $candidate }
+        }
+    }
+    return $null
+}
 
-if (-not (Test-Path $pythonExe)) {
+function New-LocalPythonEnvironment {
     Write-Step "Creating local Python environment under .runtime\venv"
+    if ($recordedPythonExe -and (Test-Path $recordedPythonExe)) {
+        try {
+            & $recordedPythonExe -m venv $venvDir
+            if ($LASTEXITCODE -eq 0) { return }
+        }
+        catch {
+            Write-Step "Recorded Python path is not executable, falling back to PATH lookup"
+        }
+    }
     $python = Get-Command py.exe -ErrorAction SilentlyContinue
     if ($python) {
         & $python.Source -3 -m venv $venvDir
@@ -93,6 +110,26 @@ if (-not (Test-Path $pythonExe)) {
         & $python.Source -m venv $venvDir
     }
     if ($LASTEXITCODE -ne 0) { throw "Python venv creation failed." }
+}
+
+function Test-LocalPythonEnvironment {
+    if (-not (Test-Path $pythonExe)) { return $false }
+    & $pythonExe --version *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+New-Item -ItemType Directory -Force -Path $runtimeDir, $pipCache, $browserDir, $logDir | Out-Null
+$env:PIP_CACHE_DIR = $pipCache
+$env:PLAYWRIGHT_BROWSERS_PATH = $browserDir
+$env:MENTOR_LITE_ROOT = $root
+
+$recordedPythonExe = Get-RecordedVenvPython
+if (-not (Test-LocalPythonEnvironment)) {
+    if (Test-Path $venvDir) {
+        Write-Step "Recreating invalid local Python environment"
+        Remove-Item -LiteralPath $venvDir -Recurse -Force
+    }
+    New-LocalPythonEnvironment
 }
 
 Write-Step "Installing tool dependencies into local .runtime\venv"

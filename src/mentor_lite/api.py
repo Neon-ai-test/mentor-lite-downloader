@@ -78,7 +78,8 @@ class KnowledgePayload(BaseModel):
 class TaskPayload(BaseModel):
     knowledge_point_id: str = Field(min_length=1, max_length=120)
     keyword: str = Field(default="", max_length=200)
-    target_count: int = Field(default=100, ge=1, le=200)
+    target_count: int = Field(default=100, ge=1, le=500)
+    max_duration_minutes: int | None = Field(default=None, ge=0, le=240)
 
 
 class DownloadPayload(BaseModel):
@@ -117,6 +118,12 @@ def model_data(model: BaseModel) -> dict[str, Any]:
     if callable(dump):
         return dump()
     return model.dict()
+
+
+def task_max_duration_seconds(payload: TaskPayload) -> int | None:
+    if payload.max_duration_minutes is None:
+        return settings.max_duration_seconds
+    return max(0, int(payload.max_duration_minutes) * 60)
 
 
 def upload_dir() -> Path:
@@ -213,7 +220,13 @@ def candidate_downloading(candidate_id: int) -> bool:
         return candidate_id in active_candidate_ids
 
 
-def run_discovery_task(task_id: str, point_id: str, keyword: str, target_count: int) -> None:
+def run_discovery_task(
+    task_id: str,
+    point_id: str,
+    keyword: str,
+    target_count: int,
+    max_duration_seconds: int | None,
+) -> None:
     point = repository.get_knowledge(point_id)
     if point is None:
         repository.update_task(
@@ -241,6 +254,7 @@ def run_discovery_task(task_id: str, point_id: str, keyword: str, target_count: 
             point,
             keyword=keyword,
             target_count=target_count,
+            max_duration_seconds=max_duration_seconds,
             progress=progress,
         )
         saved = repository.save_candidates(task_id, candidates)
@@ -332,6 +346,20 @@ def background_options() -> dict[str, Any]:
     return options
 
 
+def open_system_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        command = ["explorer", str(path)]
+    elif sys.platform == "darwin":
+        command = ["open", str(path)]
+    else:
+        command = ["xdg-open", str(path)]
+    try:
+        subprocess.Popen(command, **background_options())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"打开目录失败：{exc}") from exc
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -358,7 +386,14 @@ def summary() -> dict[str, Any]:
         "running_count": sum(1 for item in tasks if item["status"] == "RUNNING"),
         "downloading_count": sum(1 for item in candidates if item["download_status"] == "DOWNLOADING"),
         "download_root": str(settings.download_dir),
+        "max_duration_seconds": settings.max_duration_seconds,
     }
+
+
+@app.post("/api/downloads/open")
+def open_downloads() -> dict[str, Any]:
+    open_system_directory(settings.download_dir)
+    return {"opened": True, "path": str(settings.download_dir)}
 
 
 @app.get("/api/auth")
@@ -520,12 +555,13 @@ def create_task(payload: TaskPayload) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="知识点不存在")
     task_id = uuid.uuid4().hex
     keyword = payload.keyword.strip() or point.name
-    repository.create_task(task_id, point.id, keyword, payload.target_count)
+    max_duration_seconds = task_max_duration_seconds(payload)
+    repository.create_task(task_id, point.id, keyword, payload.target_count, max_duration_seconds)
     with active_lock:
         active_task_ids.add(task_id)
     Thread(
         target=run_discovery_task,
-        args=(task_id, point.id, keyword, payload.target_count),
+        args=(task_id, point.id, keyword, payload.target_count, max_duration_seconds),
         daemon=True,
     ).start()
     return {"task_id": task_id, "status": "RUNNING"}
