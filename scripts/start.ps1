@@ -310,7 +310,7 @@ function Install-BundledPythonFromInternet {
             $arguments = @(
                 "/quiet",
                 "InstallAllUsers=0",
-                "TargetDir=$bundledPythonDir",
+                "`"TargetDir=$bundledPythonDir`"",
                 "Include_pip=1",
                 "Include_launcher=0",
                 "PrependPath=0",
@@ -321,6 +321,9 @@ function Install-BundledPythonFromInternet {
             $process = Start-Process -FilePath $installerPath -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
             if ($process.ExitCode -ne 0) {
                 throw "Python installer failed with exit code $($process.ExitCode)."
+            }
+            if (-not (Test-Path $bundledPythonExe)) {
+                throw "Python installer completed but did not create the expected executable: $bundledPythonExe"
             }
             & $bundledPythonExe --version *> $null
             if ($LASTEXITCODE -ne 0) {
