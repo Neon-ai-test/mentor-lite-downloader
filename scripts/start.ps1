@@ -208,34 +208,41 @@ function Get-RecordedVenvPython {
     return $null
 }
 
-function Find-BootstrapPython {
+function New-BootstrapCandidate([string]$Label, [string]$Exe, [string[]]$Args = @()) {
+    return [pscustomobject]@{
+        Label = $Label
+        Exe = $Exe
+        Args = $Args
+    }
+}
+
+function Get-BootstrapPythonCandidates {
+    $candidates = @()
     if (Test-Path $bundledPythonExe) {
-        try {
-            & $bundledPythonExe --version *> $null
-            if ($LASTEXITCODE -eq 0) { return @{ Exe = $bundledPythonExe; Args = @() } }
-        }
-        catch {
-            Write-Step "Bundled Python runtime is not executable"
-        }
+        $candidates += New-BootstrapCandidate "bundled Python" $bundledPythonExe
     }
     if ($recordedPythonExe -and (Test-Path $recordedPythonExe)) {
-        try {
-            & $recordedPythonExe --version *> $null
-            if ($LASTEXITCODE -eq 0) { return @{ Exe = $recordedPythonExe; Args = @() } }
-        }
-        catch {
-            Write-Step "Recorded Python path is not executable"
-        }
+        $candidates += New-BootstrapCandidate "recorded Python" $recordedPythonExe
     }
     $pyLauncher = Get-Command py.exe -ErrorAction SilentlyContinue
     if ($pyLauncher) {
-        return @{ Exe = $pyLauncher.Source; Args = @("-3") }
+        $candidates += New-BootstrapCandidate "py launcher" $pyLauncher.Source @("-3")
     }
     $python = Get-Command python.exe -ErrorAction SilentlyContinue
     if ($python) {
-        return @{ Exe = $python.Source; Args = @() }
+        $candidates += New-BootstrapCandidate "system python" $python.Source
     }
-    return $null
+    return $candidates
+}
+
+function Test-BootstrapPythonCandidate($Candidate) {
+    try {
+        & $Candidate.Exe @($Candidate.Args) -c "import sys, venv; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" *> $null
+        return ($LASTEXITCODE -eq 0)
+    }
+    catch {
+        return $false
+    }
 }
 
 function Assert-PathInsideTool([string]$TargetPath) {
@@ -255,6 +262,9 @@ function Assert-PathInsideTool([string]$TargetPath) {
 function Install-BundledPythonFromInternet {
     Write-Step "Bundled Python was not found; downloading Python $pythonBootstrapVersion"
     New-Item -ItemType Directory -Force -Path $installerDir | Out-Null
+    if ((Test-Path $pythonInstallerPath) -and ((Get-Item $pythonInstallerPath).Length -lt 1048576)) {
+        Remove-Item -LiteralPath $pythonInstallerPath -Force
+    }
     if (-not (Test-Path $pythonInstallerPath)) {
         Invoke-DownloadWithFallback $pythonInstallerUrls $pythonInstallerPath "Python $pythonBootstrapVersion installer" | Out-Null
     }
@@ -289,16 +299,41 @@ function Install-BundledPythonFromInternet {
 
 function New-LocalPythonEnvironment {
     Write-Step "Creating local Python environment under .runtime\venv"
-    $bootstrap = Find-BootstrapPython
-    if (-not $bootstrap) {
-        Install-BundledPythonFromInternet
-        $bootstrap = Find-BootstrapPython
+    foreach ($candidate in Get-BootstrapPythonCandidates) {
+        if (-not (Test-BootstrapPythonCandidate $candidate)) {
+            Write-Step "Skipping unusable $($candidate.Label)"
+            continue
+        }
+        if (Test-Path $venvDir) {
+            Assert-PathInsideTool $venvDir
+            Remove-Item -LiteralPath $venvDir -Recurse -Force
+        }
+        Write-Step "Trying venv creation with $($candidate.Label)"
+        & $candidate.Exe @($candidate.Args) -m venv $venvDir
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $pythonExe)) {
+            return
+        }
+        Write-Step "Venv creation failed with $($candidate.Label); trying next Python source"
+        if (Test-Path $venvDir) {
+            Assert-PathInsideTool $venvDir
+            Remove-Item -LiteralPath $venvDir -Recurse -Force
+        }
     }
-    if (-not $bootstrap) {
-        throw "Python 3.11+ was not found and automatic Python download did not produce a usable runtime."
+
+    Install-BundledPythonFromInternet
+    $downloaded = New-BootstrapCandidate "downloaded bundled Python" $bundledPythonExe
+    if (-not (Test-BootstrapPythonCandidate $downloaded)) {
+        throw "Downloaded bundled Python is not usable."
     }
-    & $bootstrap.Exe @($bootstrap.Args) -m venv $venvDir
-    if ($LASTEXITCODE -ne 0) { throw "Python venv creation failed." }
+    if (Test-Path $venvDir) {
+        Assert-PathInsideTool $venvDir
+        Remove-Item -LiteralPath $venvDir -Recurse -Force
+    }
+    Write-Step "Trying venv creation with downloaded bundled Python"
+    & $downloaded.Exe -m venv $venvDir
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $pythonExe)) {
+        throw "Python venv creation failed after trying all Python sources."
+    }
 }
 
 function Test-LocalPythonEnvironment {
