@@ -15,6 +15,7 @@ $pipCache = Join-Path $runtimeDir "pip-cache"
 $browserDir = Join-Path $runtimeDir "playwright"
 $installerDir = Join-Path $runtimeDir "installers"
 $logDir = Join-Path $runtimeDir "logs"
+$bootstrapLog = Join-Path $logDir "bootstrap.log"
 $pidFile = Join-Path $runtimeDir "server.pid"
 $outLog = Join-Path $logDir "server.stdout.log"
 $errLog = Join-Path $logDir "server.stderr.log"
@@ -79,6 +80,24 @@ function Write-Step([string]$Message) {
     Write-Host "[MENTOR-LITE] $Message" -ForegroundColor Cyan
 }
 
+function Get-SourceRevision {
+    if (-not (Test-Path (Join-Path $root ".git"))) { return "unknown" }
+    try {
+        $revision = (& git -C $root rev-parse --short HEAD 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $revision) { return $revision.Trim() }
+    }
+    catch {}
+    return "unknown"
+}
+
+function Write-BootstrapBanner {
+    Write-Step "Bootstrap script: $PSCommandPath"
+    Write-Step "Tool root: $root"
+    Write-Step "Source revision: $(Get-SourceRevision)"
+    Write-Step "Python bootstrap mode: runtime zip ($($pythonBootstrapVersions -join ', '))"
+    Write-Step "Bootstrap log: $bootstrapLog"
+}
+
 function Invoke-DownloadWithFallback([string[]]$Urls, [string]$Destination, [string]$Label) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
     if (Test-Path $Destination) {
@@ -125,6 +144,19 @@ function Get-PythonRuntimeUrls([string]$Version) {
 
 function Get-PythonRuntimeArchivePath([string]$Version) {
     return Join-Path $installerDir "python-$Version-amd64.zip"
+}
+
+function Get-ExtractedPythonRuntimeDir([string]$ExtractDir) {
+    $rootPython = Join-Path $ExtractDir "python.exe"
+    if (Test-Path $rootPython) { return $ExtractDir }
+
+    $nestedRuntimeDir = Get-ChildItem -LiteralPath $ExtractDir -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName "python.exe") } |
+        Sort-Object FullName |
+        Select-Object -First 1
+    if ($nestedRuntimeDir) { return $nestedRuntimeDir.FullName }
+
+    return $null
 }
 
 function Invoke-PipWithIndexFallback([string]$Description, [string[]]$Arguments) {
@@ -313,14 +345,12 @@ function Install-BundledPythonFromInternet {
 
             Write-Step "Extracting Python $version into .runtime\python"
             Expand-Archive -LiteralPath $archivePath -DestinationPath $extractDir -Force
-            $extractedPython = Get-ChildItem -Path $extractDir -Recurse -Filter "python.exe" -File -ErrorAction SilentlyContinue |
-                Sort-Object FullName |
-                Select-Object -First 1
-            if (-not $extractedPython) {
-                throw "Python runtime zip did not contain python.exe."
+            $runtimeSourceDir = Get-ExtractedPythonRuntimeDir $extractDir
+            if (-not $runtimeSourceDir) {
+                throw "Python runtime zip did not contain a root python.exe."
             }
 
-            Get-ChildItem -LiteralPath $extractedPython.Directory.FullName -Force |
+            Get-ChildItem -LiteralPath $runtimeSourceDir -Force |
                 Move-Item -Destination $bundledPythonDir -Force
             Remove-Item -LiteralPath $extractDir -Recurse -Force
 
@@ -409,6 +439,13 @@ function Test-PlaywrightChromium {
 }
 
 New-Item -ItemType Directory -Force -Path $runtimeDir, $pipCache, $browserDir, $installerDir, $logDir | Out-Null
+try {
+    Start-Transcript -Path $bootstrapLog -Force | Out-Null
+}
+catch {
+    Write-Step "Could not write bootstrap log: $($_.Exception.Message)"
+}
+Write-BootstrapBanner
 $env:PIP_CACHE_DIR = $pipCache
 $env:PLAYWRIGHT_BROWSERS_PATH = $browserDir
 $env:MENTOR_LITE_ROOT = $root
