@@ -173,10 +173,10 @@ function Invoke-PipWithIndexFallback([string]$Description, [string[]]$Arguments)
 
 function Invoke-PlaywrightInstallWithFallback {
     $errors = New-Object System.Collections.Generic.List[string]
-    foreach ($host in $playwrightDownloadHosts) {
-        if ($host) {
-            Write-Step "Installing Playwright Chromium via $host"
-            $env:PLAYWRIGHT_DOWNLOAD_HOST = $host
+    foreach ($downloadHost in $playwrightDownloadHosts) {
+        if ($downloadHost) {
+            Write-Step "Installing Playwright Chromium via $downloadHost"
+            $env:PLAYWRIGHT_DOWNLOAD_HOST = $downloadHost
         }
         else {
             Write-Step "Installing Playwright Chromium via default Playwright CDN"
@@ -187,7 +187,7 @@ function Invoke-PlaywrightInstallWithFallback {
             Remove-Item Env:\PLAYWRIGHT_DOWNLOAD_HOST -ErrorAction SilentlyContinue
             return
         }
-        $label = if ($host) { $host } else { "default" }
+        $label = if ($downloadHost) { $downloadHost } else { "default" }
         $errors.Add("$label -> exit $LASTEXITCODE")
     }
     Remove-Item Env:\PLAYWRIGHT_DOWNLOAD_HOST -ErrorAction SilentlyContinue
