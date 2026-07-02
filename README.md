@@ -31,7 +31,7 @@
 
 源码包首次启动会按需联网下载：
 
-- Python 安装器：默认 `https://www.python.org/ftp/python/3.12.13/python-3.12.13-amd64.exe`
+- Python 安装器：默认优先下载 `3.12.10`，失败后自动尝试 `3.11.9`
 - Python 包依赖：从 Python package index 下载到本地 `.runtime/venv/`
 - Playwright Chromium：下载到 `.runtime/playwright/`
 
@@ -43,8 +43,9 @@
 
 可选环境变量：
 
-- `MENTOR_LITE_PYTHON_VERSION`：默认 `3.12.13`
-- `MENTOR_LITE_PYTHON_INSTALLER_URLS`：自定义 Python 安装器下载源，多个地址用分号分隔
+- `MENTOR_LITE_PYTHON_VERSIONS`：自定义 Python 下载版本顺序，默认 `3.12.10;3.11.9`
+- `MENTOR_LITE_PYTHON_VERSION`：只指定一个 Python 下载版本，会覆盖默认版本顺序
+- `MENTOR_LITE_PYTHON_INSTALLER_URLS`：自定义 Python 安装器下载源，多个地址用分号分隔；地址里可用 `{version}` 作为版本占位符
 - `MENTOR_LITE_PIP_INDEX_URLS`：自定义 pip 镜像，多个地址用分号分隔
 - `MENTOR_LITE_PLAYWRIGHT_DOWNLOAD_HOSTS`：自定义 Playwright 浏览器下载源，多个地址用分号分隔
 - `MENTOR_LITE_DOWNLOAD_TIMEOUT_SECONDS` / `MENTOR_LITE_PIP_TIMEOUT_SECONDS`：下载超时时间

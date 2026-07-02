@@ -19,10 +19,18 @@ $pidFile = Join-Path $runtimeDir "server.pid"
 $outLog = Join-Path $logDir "server.stdout.log"
 $errLog = Join-Path $logDir "server.stderr.log"
 $recordedPythonExe = $null
-$pythonBootstrapVersion = if ($env:MENTOR_LITE_PYTHON_VERSION) { $env:MENTOR_LITE_PYTHON_VERSION } else { "3.12.13" }
+$pythonBootstrapVersions = if ($env:MENTOR_LITE_PYTHON_VERSIONS) {
+    $env:MENTOR_LITE_PYTHON_VERSIONS -split "[;,\r\n]+" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }
+}
+elseif ($env:MENTOR_LITE_PYTHON_VERSION) {
+    @($env:MENTOR_LITE_PYTHON_VERSION)
+}
+else {
+    @("3.12.10", "3.11.9")
+}
 $downloadTimeoutSeconds = if ($env:MENTOR_LITE_DOWNLOAD_TIMEOUT_SECONDS) { [int]$env:MENTOR_LITE_DOWNLOAD_TIMEOUT_SECONDS } else { 90 }
 $pipTimeoutSeconds = if ($env:MENTOR_LITE_PIP_TIMEOUT_SECONDS) { [int]$env:MENTOR_LITE_PIP_TIMEOUT_SECONDS } else { 45 }
-$pythonInstallerUrls = if ($env:MENTOR_LITE_PYTHON_INSTALLER_URLS) {
+$pythonInstallerUrlTemplates = if ($env:MENTOR_LITE_PYTHON_INSTALLER_URLS) {
     $env:MENTOR_LITE_PYTHON_INSTALLER_URLS -split "[;,\r\n]+" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }
 }
 elseif ($env:MENTOR_LITE_PYTHON_INSTALLER_URL) {
@@ -30,14 +38,13 @@ elseif ($env:MENTOR_LITE_PYTHON_INSTALLER_URL) {
 }
 else {
     @(
-        "https://www.python.org/ftp/python/$pythonBootstrapVersion/python-$pythonBootstrapVersion-amd64.exe",
-        "https://npmmirror.com/mirrors/python/$pythonBootstrapVersion/python-$pythonBootstrapVersion-amd64.exe",
-        "https://registry.npmmirror.com/-/binary/python/$pythonBootstrapVersion/python-$pythonBootstrapVersion-amd64.exe",
-        "https://mirrors.huaweicloud.com/python/$pythonBootstrapVersion/python-$pythonBootstrapVersion-amd64.exe",
-        "https://mirrors.tuna.tsinghua.edu.cn/python/$pythonBootstrapVersion/python-$pythonBootstrapVersion-amd64.exe"
+        "https://www.python.org/ftp/python/{version}/python-{version}-amd64.exe",
+        "https://npmmirror.com/mirrors/python/{version}/python-{version}-amd64.exe",
+        "https://registry.npmmirror.com/-/binary/python/{version}/python-{version}-amd64.exe",
+        "https://mirrors.huaweicloud.com/python/{version}/python-{version}-amd64.exe",
+        "https://mirrors.tuna.tsinghua.edu.cn/python/{version}/python-{version}-amd64.exe"
     )
 }
-$pythonInstallerPath = Join-Path $installerDir "python-$pythonBootstrapVersion-amd64.exe"
 $pipIndexUrls = if ($env:MENTOR_LITE_PIP_INDEX_URLS) {
     $env:MENTOR_LITE_PIP_INDEX_URLS -split "[;,\r\n]+" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() }
 }
@@ -101,6 +108,23 @@ function Invoke-DownloadWithFallback([string[]]$Urls, [string]$Destination, [str
         }
     }
     throw "Failed to download $Label from all configured sources: $($errors -join ' | ')"
+}
+
+function Get-PythonInstallerUrls([string]$Version) {
+    return @(
+        $pythonInstallerUrlTemplates | ForEach-Object {
+            if ($_ -match "\{version\}") {
+                $_.Replace("{version}", $Version)
+            }
+            else {
+                $_
+            }
+        }
+    )
+}
+
+function Get-PythonInstallerPath([string]$Version) {
+    return Join-Path $installerDir "python-$Version-amd64.exe"
 }
 
 function Invoke-PipWithIndexFallback([string]$Description, [string[]]$Arguments) {
@@ -260,41 +284,59 @@ function Assert-PathInsideTool([string]$TargetPath) {
 }
 
 function Install-BundledPythonFromInternet {
-    Write-Step "Bundled Python was not found; downloading Python $pythonBootstrapVersion"
     New-Item -ItemType Directory -Force -Path $installerDir | Out-Null
-    if ((Test-Path $pythonInstallerPath) -and ((Get-Item $pythonInstallerPath).Length -lt 1048576)) {
-        Remove-Item -LiteralPath $pythonInstallerPath -Force
-    }
-    if (-not (Test-Path $pythonInstallerPath)) {
-        Invoke-DownloadWithFallback $pythonInstallerUrls $pythonInstallerPath "Python $pythonBootstrapVersion installer" | Out-Null
-    }
 
-    if (Test-Path $bundledPythonDir) {
-        Assert-PathInsideTool $bundledPythonDir
-        Remove-Item -LiteralPath $bundledPythonDir -Recurse -Force
-    }
-    New-Item -ItemType Directory -Force -Path $bundledPythonDir | Out-Null
+    $errors = New-Object System.Collections.Generic.List[string]
+    foreach ($version in $pythonBootstrapVersions) {
+        $installerPath = Get-PythonInstallerPath $version
+        $installerUrls = Get-PythonInstallerUrls $version
+        Write-Step "Bundled Python was not found; trying Python $version"
 
-    Write-Step "Installing Python into .runtime\python"
-    $arguments = @(
-        "/quiet",
-        "InstallAllUsers=0",
-        "TargetDir=$bundledPythonDir",
-        "Include_pip=1",
-        "Include_launcher=0",
-        "PrependPath=0",
-        "Include_test=0",
-        "Shortcuts=0",
-        "AssociateFiles=0"
-    )
-    $process = Start-Process -FilePath $pythonInstallerPath -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
-    if ($process.ExitCode -ne 0) {
-        throw "Python installer failed with exit code $($process.ExitCode)."
+        try {
+            if ((Test-Path $installerPath) -and ((Get-Item $installerPath).Length -lt 1048576)) {
+                Remove-Item -LiteralPath $installerPath -Force
+            }
+            if (-not (Test-Path $installerPath)) {
+                Invoke-DownloadWithFallback $installerUrls $installerPath "Python $version installer" | Out-Null
+            }
+
+            if (Test-Path $bundledPythonDir) {
+                Assert-PathInsideTool $bundledPythonDir
+                Remove-Item -LiteralPath $bundledPythonDir -Recurse -Force
+            }
+            New-Item -ItemType Directory -Force -Path $bundledPythonDir | Out-Null
+
+            Write-Step "Installing Python $version into .runtime\python"
+            $arguments = @(
+                "/quiet",
+                "InstallAllUsers=0",
+                "TargetDir=$bundledPythonDir",
+                "Include_pip=1",
+                "Include_launcher=0",
+                "PrependPath=0",
+                "Include_test=0",
+                "Shortcuts=0",
+                "AssociateFiles=0"
+            )
+            $process = Start-Process -FilePath $installerPath -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
+            if ($process.ExitCode -ne 0) {
+                throw "Python installer failed with exit code $($process.ExitCode)."
+            }
+            & $bundledPythonExe --version *> $null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Bundled Python validation failed after installation."
+            }
+            return
+        }
+        catch {
+            $errors.Add("Python $version -> $($_.Exception.Message)")
+            if (Test-Path $bundledPythonDir) {
+                Assert-PathInsideTool $bundledPythonDir
+                Remove-Item -LiteralPath $bundledPythonDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
-    & $bundledPythonExe --version *> $null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Bundled Python validation failed after installation."
-    }
+    throw "Failed to install bundled Python from all configured versions: $($errors -join ' | ')"
 }
 
 function New-LocalPythonEnvironment {
