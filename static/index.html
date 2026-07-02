@@ -166,6 +166,10 @@
                   <input id="importStage" value="初中" placeholder="学段" />
                   <input id="importGrade" value="九年级" placeholder="年级" />
                   <input id="importTextbook" value="人教版" placeholder="教材" />
+                  <select id="importMode">
+                    <option value="append">追加到当前目录</option>
+                    <option value="replace">替换当前目录</option>
+                  </select>
                 </div>
                 <input id="importFile" type="file" accept=".xlsx,.xlsm,.csv" />
                 <div class="row">
@@ -242,6 +246,6 @@
     </main>
 
     <div id="toast" class="toast"></div>
-    <script src="/static/app.js?v=20260630-knowledge-bulk"></script>
+    <script src="/static/app.js?v=20260630-main-import-order"></script>
   </body>
 </html>

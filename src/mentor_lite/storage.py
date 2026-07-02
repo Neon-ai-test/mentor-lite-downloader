@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS knowledge_point (
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     aliases_json TEXT NOT NULL DEFAULT '[]',
+    sort_order INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -91,12 +92,19 @@ class Repository:
     def initialize(self) -> None:
         with closing(self.connect()) as connection:
             connection.executescript(SCHEMA)
-            columns = {
+            candidate_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(candidate)").fetchall()
             }
-            if "share_count" not in columns:
+            if "share_count" not in candidate_columns:
                 connection.execute("ALTER TABLE candidate ADD COLUMN share_count INTEGER NOT NULL DEFAULT 0")
+            knowledge_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(knowledge_point)").fetchall()
+            }
+            if "sort_order" not in knowledge_columns:
+                connection.execute("ALTER TABLE knowledge_point ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+                connection.execute("UPDATE knowledge_point SET sort_order = rowid WHERE sort_order = 0")
             connection.commit()
             connection.execute(
                 "UPDATE task SET status = 'FAILED', stage = 'FAILED', message = ? WHERE status = 'RUNNING'",
@@ -112,15 +120,29 @@ class Repository:
             )
             connection.commit()
 
-    def upsert_knowledge(self, point: KnowledgePoint) -> None:
+    def upsert_knowledge(self, point: KnowledgePoint, sort_order: int | None = None) -> None:
         now = utc_now()
         with closing(self.connect()) as connection:
             with connection:
+                existing = connection.execute(
+                    "SELECT sort_order FROM knowledge_point WHERE id = ?",
+                    (point.id,),
+                ).fetchone()
+                if sort_order is None:
+                    if existing:
+                        resolved_sort_order = int(existing["sort_order"] or 0)
+                    else:
+                        row = connection.execute(
+                            "SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_order FROM knowledge_point"
+                        ).fetchone()
+                        resolved_sort_order = int(row["next_order"] or 1)
+                else:
+                    resolved_sort_order = int(sort_order)
                 connection.execute(
                     """INSERT INTO knowledge_point
                        (id, subject, stage, grade, textbook, chapter, group_name, name,
-                        description, aliases_json, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        description, aliases_json, sort_order, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(id) DO UPDATE SET
                         subject = excluded.subject,
                         stage = excluded.stage,
@@ -131,6 +153,7 @@ class Repository:
                         name = excluded.name,
                         description = excluded.description,
                         aliases_json = excluded.aliases_json,
+                        sort_order = excluded.sort_order,
                         updated_at = excluded.updated_at""",
                     (
                         point.id,
@@ -143,16 +166,24 @@ class Repository:
                         point.name,
                         point.description,
                         json.dumps(point.aliases, ensure_ascii=False),
+                        resolved_sort_order,
                         now,
                         now,
                     ),
                 )
 
+    def replace_knowledge(self, points: list[KnowledgePoint]) -> None:
+        with closing(self.connect()) as connection:
+            with connection:
+                connection.execute("DELETE FROM knowledge_point")
+        for index, point in enumerate(points, start=1):
+            self.upsert_knowledge(point, sort_order=index)
+
     def list_knowledge(self) -> list[dict[str, Any]]:
         with closing(self.connect()) as connection:
             rows = connection.execute(
                 """SELECT * FROM knowledge_point
-                   ORDER BY subject, stage, grade, textbook, chapter, group_name, name"""
+                   ORDER BY sort_order ASC, created_at ASC, id ASC"""
             ).fetchall()
         return [knowledge_row_to_dict(row) for row in rows]
 

@@ -3,9 +3,11 @@ from __future__ import annotations
 import base64
 import csv
 import hashlib
+import json
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,7 @@ STANDARD_FIELDS: list[dict[str, object]] = [
 
 REQUIRED_FIELDS = {str(field["key"]) for field in STANDARD_FIELDS if field.get("required")}
 SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xlsm"}
+FILL_DOWN_FIELDS = ("chapter", "group")
 FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "chapter": ("chapter", "章节", "章", "单元", "模块", "教材章节", "目录"),
     "group": (
@@ -179,6 +182,176 @@ def preview_upload(
         "standard_fields": standard_fields(),
         "suggested_mapping": suggest_mapping(worksheet.headers),
     }
+
+
+def import_knowledge_points(
+    file_path: Path,
+    output_path: Path,
+    field_mapping: dict[str, str | None],
+    defaults: dict[str, str] | None = None,
+    mode: str = "append",
+    sheet_name: str | None = None,
+    header_row: int | None = None,
+) -> dict[str, object]:
+    worksheet = read_worksheet(file_path, sheet_name=sheet_name, header_row=header_row)
+    mapping = validate_mapping(field_mapping, worksheet.headers)
+    default_values = {key: normalize_text(value) for key, value in (defaults or {}).items()}
+    validate_base_config(default_values)
+
+    items: list[dict[str, object]] = []
+    errors: list[str] = []
+    carry_values: dict[str, str] = {}
+    for index, row in enumerate(worksheet.rows, start=worksheet.header_row + 1):
+        item: dict[str, object] = {
+            "subject": default_values["subject"],
+            "grade": default_values["grade"],
+            "textbook": default_values["textbook"],
+            "source": default_values["textbook"],
+        }
+        if default_values.get("stage"):
+            item["stage"] = default_values["stage"]
+
+        mapped_values: dict[str, str] = {}
+        for field in STANDARD_FIELDS:
+            key = str(field["key"])
+            source_column = mapping.get(key)
+            value = row.get(source_column or "", "") if source_column else ""
+            mapped_values[key] = clean_heading(value)
+
+        if not any(mapped_values.values()):
+            continue
+
+        apply_fill_down_values(mapped_values, carry_values)
+        for key, value in mapped_values.items():
+            if value:
+                item[key] = value
+
+        name = str(item.get("name") or "")
+        item["aliases"] = [name] if name else []
+
+        missing = [key for key in REQUIRED_FIELDS if not item.get(key)]
+        if missing:
+            if any(row.values()):
+                errors.append(f"第 {index} 行缺少必填字段：{', '.join(field_label(key) for key in missing)}")
+            continue
+        item.setdefault("description", "")
+        item["id"] = unique_knowledge_id(item, [str(existing.get("id")) for existing in items])
+        items.append(item)
+
+    if not items:
+        detail = errors[0] if errors else "没有可导入的知识点行"
+        raise ValueError(detail)
+
+    existing_payload = load_catalog_payload(output_path) if mode != "replace" else {}
+    existing_items = existing_payload.get("knowledge_points") or []
+    merged_items = merge_items(existing_items, items)
+    payload = {
+        "version": 1,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "source": "user_upload",
+        "knowledge_points": merged_items,
+        "imports": [
+            *list(existing_payload.get("imports") or []),
+            {
+                "filename": file_path.name,
+                "sheet_name": worksheet.sheet_name,
+                "header_row": worksheet.header_row,
+                "mode": mode,
+                "imported_count": len(items),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+        ],
+    }
+    save_catalog_payload(output_path, payload)
+    return {
+        "imported_count": len(items),
+        "total_count": len(merged_items),
+        "skipped_count": max(0, len(worksheet.rows) - len(items)),
+        "errors": errors[:20],
+        "catalog_path": str(output_path),
+        "knowledge_points": items[:20],
+    }
+
+
+def apply_fill_down_values(values: dict[str, str], carry_values: dict[str, str]) -> None:
+    previous_chapter = carry_values.get("chapter", "")
+    chapter = values.get("chapter", "")
+    group = values.get("group", "")
+    if chapter:
+        carry_values["chapter"] = chapter
+        if chapter != previous_chapter and not group:
+            carry_values.pop("group", None)
+    elif carry_values.get("chapter"):
+        values["chapter"] = carry_values["chapter"]
+
+    if group:
+        carry_values["group"] = group
+    elif carry_values.get("group"):
+        values["group"] = carry_values["group"]
+
+
+def validate_base_config(default_values: dict[str, str]) -> None:
+    required = {
+        "subject": "学科",
+        "grade": "年级",
+        "textbook": "教材",
+    }
+    missing = [label for key, label in required.items() if not default_values.get(key)]
+    if missing:
+        raise ValueError(f"请先选择基础配置：{', '.join(missing)}")
+
+
+def load_catalog_payload(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def save_catalog_payload(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def merge_items(
+    existing_items: list[Any],
+    imported_items: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    merged: dict[str, dict[str, object]] = {}
+    for item in existing_items:
+        if isinstance(item, dict):
+            item_id = str(item.get("id") or stable_item_id(item))
+            merged[item_id] = dict(item)
+    for item in imported_items:
+        item_id = str(item["id"])
+        merged[item_id] = dict(item)
+    return list(merged.values())
+
+
+def unique_knowledge_id(item: dict[str, object], existing_ids: list[str]) -> str:
+    raw_id = normalize_text(item.get("id"))
+    base = raw_id or stable_item_id(item)
+    candidate = base
+    index = 2
+    existing = set(existing_ids)
+    while candidate in existing:
+        candidate = f"{base}_{index}"
+        index += 1
+    return candidate
+
+
+def stable_item_id(item: dict[str, object]) -> str:
+    return stable_id(item)
+
+
+def catalog_item_to_knowledge_point(item: dict[str, object]) -> KnowledgePoint:
+    point_id = normalize_text(item.get("id")) or stable_item_id(item)
+    return make_knowledge_point(dict(item), point_id=point_id)
+
+
+def knowledge_point_to_catalog_item(point: KnowledgePoint) -> dict[str, object]:
+    payload = point.to_context()
+    payload["source"] = point.textbook
+    return payload
 
 
 def read_table(path: Path) -> tuple[list[str], list[dict[str, str]]]:

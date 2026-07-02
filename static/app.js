@@ -652,6 +652,7 @@ async function commitKnowledgeImport() {
       sheet_name: preview.sheet_name,
       header_row: preview.header_row,
       field_mapping: state.importMapping,
+      mode: $('importMode').value || 'append',
       defaults: {
         subject: $('importSubject').value.trim() || '数学',
         stage: $('importStage').value.trim(),

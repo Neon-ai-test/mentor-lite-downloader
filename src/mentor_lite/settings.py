@@ -27,6 +27,7 @@ class Settings:
     db_path: Path
     auth_state_path: Path
     rules_path: Path
+    knowledge_catalog_path: Path
     user_agent: str = DEFAULT_USER_AGENT
     headless: bool = True
     browser_timeout_ms: int = 30_000
@@ -51,6 +52,7 @@ class Settings:
             db_path=data_dir / "mentor_lite.db",
             auth_state_path=runtime_dir / "auth" / "bilibili.storage_state.json",
             rules_path=root / "config" / "precheck_rules.yaml",
+            knowledge_catalog_path=data_dir / "knowledge" / "knowledge_points.json",
             user_agent=os.getenv("MENTOR_LITE_USER_AGENT", DEFAULT_USER_AGENT),
             headless=os.getenv("MENTOR_LITE_HEADLESS", "true").lower() in {"1", "true", "yes", "on"},
             browser_timeout_ms=int(os.getenv("MENTOR_LITE_BROWSER_TIMEOUT_MS", "30000")),
@@ -70,5 +72,6 @@ class Settings:
             self.temp_dir,
             self.auth_state_path.parent,
             self.db_path.parent,
+            self.knowledge_catalog_path.parent,
         ):
             path.mkdir(parents=True, exist_ok=True)

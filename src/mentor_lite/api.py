@@ -3,7 +3,6 @@ from __future__ import annotations
 import subprocess
 import sys
 import uuid
-from dataclasses import asdict
 from pathlib import Path
 from threading import Lock, Thread
 from typing import Any
@@ -17,7 +16,16 @@ from pydantic import BaseModel, Field
 
 from mentor_lite.bilibili import auth_summary, search_bilibili
 from mentor_lite.downloader import download_bilibili_flat
-from mentor_lite.knowledge import import_knowledge_file, make_knowledge_point, preview_upload, save_upload
+from mentor_lite.knowledge import (
+    catalog_item_to_knowledge_point,
+    import_knowledge_points,
+    knowledge_point_to_catalog_item,
+    load_catalog_payload,
+    make_knowledge_point,
+    preview_upload,
+    save_catalog_payload,
+    save_upload,
+)
 from mentor_lite.settings import Settings
 from mentor_lite.storage import Repository
 
@@ -101,6 +109,7 @@ class KnowledgeImportCommitPayload(BaseModel):
     header_row: int | None = Field(default=None, ge=1)
     field_mapping: dict[str, str | None] = Field(default_factory=dict)
     defaults: dict[str, str] = Field(default_factory=dict)
+    mode: str = Field(default="append")
 
 
 def model_data(model: BaseModel) -> dict[str, Any]:
@@ -123,6 +132,75 @@ def resolve_upload_path(upload_id: str) -> Path:
     if not matches:
         raise HTTPException(status_code=404, detail="上传文件不存在或已被清理")
     return matches[0]
+
+
+def load_catalog_payload_or_seed() -> dict[str, Any]:
+    if settings.knowledge_catalog_path.exists():
+        return load_catalog_payload(settings.knowledge_catalog_path)
+    items = [knowledge_point_to_catalog_item(knowledge_row_to_point(row)) for row in repository.list_knowledge()]
+    payload = {
+        "version": 1,
+        "source": "mentor_lite",
+        "knowledge_points": items,
+        "imports": [],
+    }
+    save_catalog_payload(settings.knowledge_catalog_path, payload)
+    return payload
+
+
+def knowledge_row_to_point(row: dict[str, Any]) -> Any:
+    return make_knowledge_point(
+        {
+            "subject": row.get("subject", ""),
+            "stage": row.get("stage", ""),
+            "grade": row.get("grade", ""),
+            "textbook": row.get("textbook", ""),
+            "chapter": row.get("chapter", ""),
+            "group": row.get("group", ""),
+            "name": row.get("name", ""),
+            "description": row.get("description", ""),
+            "aliases": row.get("aliases", []),
+        },
+        point_id=str(row["id"]),
+    )
+
+
+def sync_repository_from_catalog() -> list[dict[str, Any]]:
+    payload = load_catalog_payload(settings.knowledge_catalog_path)
+    points = [
+        catalog_item_to_knowledge_point(item)
+        for item in payload.get("knowledge_points") or []
+        if isinstance(item, dict)
+    ]
+    repository.replace_knowledge(points)
+    return repository.list_knowledge()
+
+
+def save_point_to_catalog(point: Any) -> None:
+    payload = load_catalog_payload_or_seed()
+    items = [item for item in payload.get("knowledge_points") or [] if isinstance(item, dict)]
+    catalog_item = knowledge_point_to_catalog_item(point)
+    for index, item in enumerate(items):
+        if str(item.get("id") or "") == point.id:
+            items[index] = catalog_item
+            break
+    else:
+        items.append(catalog_item)
+    payload["knowledge_points"] = items
+    save_catalog_payload(settings.knowledge_catalog_path, payload)
+    sync_repository_from_catalog()
+
+
+def remove_points_from_catalog(point_ids: set[str]) -> None:
+    if not settings.knowledge_catalog_path.exists():
+        return
+    payload = load_catalog_payload(settings.knowledge_catalog_path)
+    items = [item for item in payload.get("knowledge_points") or [] if isinstance(item, dict)]
+    payload["knowledge_points"] = [
+        item for item in items if str(item.get("id") or "") not in point_ids
+    ]
+    save_catalog_payload(settings.knowledge_catalog_path, payload)
+    sync_repository_from_catalog()
 
 
 def task_running(task_id: str) -> bool:
@@ -330,7 +408,7 @@ def create_knowledge(payload: KnowledgePayload) -> dict[str, Any]:
         point = make_knowledge_point(model_data(payload))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    repository.upsert_knowledge(point)
+    save_point_to_catalog(point)
     saved = next((item for item in repository.list_knowledge() if item["id"] == point.id), None)
     return {"saved": True, "knowledge": saved}
 
@@ -343,14 +421,16 @@ def update_knowledge(point_id: str, payload: KnowledgePayload) -> dict[str, Any]
         point = make_knowledge_point(model_data(payload), point_id=point_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    repository.upsert_knowledge(point)
+    save_point_to_catalog(point)
     saved = next((item for item in repository.list_knowledge() if item["id"] == point.id), None)
     return {"saved": True, "knowledge": saved}
 
 
 @app.delete("/api/knowledge/{point_id}")
 def delete_knowledge(point_id: str) -> dict[str, Any]:
-    return {"deleted": repository.delete_knowledge(point_id)}
+    deleted = repository.delete_knowledge(point_id)
+    remove_points_from_catalog({point_id})
+    return {"deleted": deleted}
 
 
 @app.post("/api/knowledge/{point_id}/delete")
@@ -360,7 +440,9 @@ def delete_knowledge_action(point_id: str) -> dict[str, Any]:
 
 @app.post("/api/knowledge/delete")
 def delete_knowledge_batch(payload: IdsPayload) -> dict[str, Any]:
-    deleted = repository.delete_knowledge_many([str(item) for item in payload.ids])
+    point_ids = [str(item) for item in payload.ids]
+    deleted = repository.delete_knowledge_many(point_ids)
+    remove_points_from_catalog(set(point_ids))
     return {"deleted": deleted}
 
 
@@ -368,8 +450,12 @@ def delete_knowledge_batch(payload: IdsPayload) -> dict[str, Any]:
 def import_knowledge(payload: KnowledgeImportPayload) -> dict[str, Any]:
     try:
         upload = save_upload(upload_dir(), payload.filename, payload.content_base64)
-        points = import_knowledge_file(
+        preview = preview_upload(Path(upload["file_path"]))
+        load_catalog_payload_or_seed()
+        result = import_knowledge_points(
             Path(upload["file_path"]),
+            settings.knowledge_catalog_path,
+            field_mapping=dict(preview.get("suggested_mapping") or {}),
             defaults={
                 "subject": payload.subject,
                 "stage": payload.stage,
@@ -379,9 +465,8 @@ def import_knowledge(payload: KnowledgeImportPayload) -> dict[str, Any]:
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    for point in points:
-        repository.upsert_knowledge(point)
-    return {"imported_count": len(points), "knowledge_count": len(repository.list_knowledge())}
+    rows = sync_repository_from_catalog()
+    return {"imported_count": result["imported_count"], "knowledge_count": len(rows)}
 
 
 @app.post("/api/knowledge/import/preview")
@@ -396,7 +481,7 @@ def preview_knowledge_import(payload: KnowledgeImportPreviewPayload) -> dict[str
             "upload_id": upload["upload_id"],
             "filename": upload["filename"],
             "file_path": upload["file_path"],
-            "target_catalog_path": str(settings.data_dir / "knowledge" / "knowledge_points.json"),
+            "target_catalog_path": str(settings.knowledge_catalog_path),
         }
     )
     return preview
@@ -405,26 +490,26 @@ def preview_knowledge_import(payload: KnowledgeImportPreviewPayload) -> dict[str
 @app.post("/api/knowledge/import/commit")
 def commit_knowledge_import(payload: KnowledgeImportCommitPayload) -> dict[str, Any]:
     upload_path = resolve_upload_path(payload.upload_id)
+    if payload.mode not in {"append", "replace"}:
+        raise HTTPException(status_code=400, detail="导入模式只能是 append 或 replace")
     try:
-        points = import_knowledge_file(
+        if payload.mode != "replace":
+            load_catalog_payload_or_seed()
+        result = import_knowledge_points(
             upload_path,
+            settings.knowledge_catalog_path,
             field_mapping=payload.field_mapping,
             defaults=payload.defaults,
+            mode=payload.mode,
             sheet_name=payload.sheet_name,
             header_row=payload.header_row,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    for point in points:
-        repository.upsert_knowledge(point)
+    rows = sync_repository_from_catalog()
     return {
-        "imported_count": len(points),
-        "total_count": len(repository.list_knowledge()),
-        "skipped_count": 0,
-        "errors": [],
-        "catalog_path": str(settings.db_path),
-        "catalog_count": len(repository.list_knowledge()),
-        "knowledge_points": [asdict(point) for point in points[:20]],
+        **result,
+        "catalog_count": len(rows),
     }
 
 
