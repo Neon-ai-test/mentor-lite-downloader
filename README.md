@@ -27,17 +27,17 @@
   playwright/
 ```
 
-启动脚本会优先使用 `.runtime/python/python.exe` 创建本地环境；如果 GitHub 源码包里没有这个目录，且电脑也没有 Python，脚本会自动下载 Python 安装器并静默安装到 `.runtime/python/`。依赖不会安装到主项目，也不会使用主项目的 `.venv`。B站登录和搜索使用 `.runtime/playwright/` 内的 Chromium；视频合并使用 `.runtime/venv/` 内的 `imageio-ffmpeg`，不会调用系统 `ffmpeg.exe`。安装完成后浏览器会打开：
+启动脚本会优先使用 `.runtime/python/python.exe` 创建本地环境；如果 GitHub 源码包里没有这个目录，且电脑也没有 Python，脚本会自动下载 Python Core zip 并解压到 `.runtime/python/`，不会执行系统安装器。依赖不会安装到主项目，也不会使用主项目的 `.venv`。B站登录和搜索使用 `.runtime/playwright/` 内的 Chromium；视频合并使用 `.runtime/venv/` 内的 `imageio-ffmpeg`，不会调用系统 `ffmpeg.exe`。安装完成后浏览器会打开：
 
 源码包首次启动会按需联网下载：
 
-- Python 安装器：默认优先下载 `3.12.10`，失败后自动尝试 `3.11.9`
+- Python Core zip：默认优先下载 `3.12.10`，失败后自动尝试 `3.11.9`
 - Python 包依赖：从 Python package index 下载到本地 `.runtime/venv/`
 - Playwright Chromium：下载到 `.runtime/playwright/`
 
 如果官方源下载失败或超时，脚本会自动尝试国内镜像：
 
-- Python 安装器：npmmirror、华为云、清华镜像
+- Python Core zip：npmmirror、华为云、清华镜像
 - Python 包依赖：清华、阿里云、腾讯云、华为云、中科大 PyPI 镜像
 - Playwright Chromium：npmmirror Playwright 镜像
 
@@ -45,7 +45,7 @@
 
 - `MENTOR_LITE_PYTHON_VERSIONS`：自定义 Python 下载版本顺序，默认 `3.12.10;3.11.9`
 - `MENTOR_LITE_PYTHON_VERSION`：只指定一个 Python 下载版本，会覆盖默认版本顺序
-- `MENTOR_LITE_PYTHON_INSTALLER_URLS`：自定义 Python 安装器下载源，多个地址用分号分隔；地址里可用 `{version}` 作为版本占位符
+- `MENTOR_LITE_PYTHON_RUNTIME_URLS`：自定义 Python Core zip 下载源，多个地址用分号分隔；地址里可用 `{version}` 作为版本占位符
 - `MENTOR_LITE_PIP_INDEX_URLS`：自定义 pip 镜像，多个地址用分号分隔
 - `MENTOR_LITE_PLAYWRIGHT_DOWNLOAD_HOSTS`：自定义 Playwright 浏览器下载源，多个地址用分号分隔
 - `MENTOR_LITE_DOWNLOAD_TIMEOUT_SECONDS` / `MENTOR_LITE_PIP_TIMEOUT_SECONDS`：下载超时时间
